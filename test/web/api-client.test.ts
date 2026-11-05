@@ -11,6 +11,7 @@ const NOT_CALLED_BY_SPA = new Set([
   'GET /api/meta/manifest',
   'GET /api/notes/:id',
   'POST /api/ai/complete',
+  'GET /api/test',
 ]);
 
 const registry = new Set(allRoutes.map((d) => `${d.spec.method} ${d.spec.path}`));

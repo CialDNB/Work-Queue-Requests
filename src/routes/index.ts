@@ -10,6 +10,7 @@ import { createMetaRoutes } from './meta';
 import { notesRoutes } from './notes';
 import { readLogRoutes } from './readLog';
 import { settingsRoutes } from './settings';
+import { testRoutes } from './test';
 import { tokensRoutes } from './tokens';
 import { usersRoutes } from './users';
 
@@ -30,4 +31,5 @@ export const allRoutes: readonly RouteDef[] = [
   ...readLogRoutes,
   ...aiRoutes,
   ...settingsRoutes,
+  ...testRoutes,
 ];
