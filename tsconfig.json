@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    // Both, always together, and only for the one pattern that puts plain JavaScript in the
+    // worker: a dependency-free `.mjs` under src/ that a plain-node script (which cannot import
+    // TS) and the runtime both import, so they share ONE definition instead of mirroring it.
+    // The kit's own are src/framework/readAuditVocabulary.mjs (the read-ledger arming
+    // vocabulary), src/ai/policyVocabulary.mjs (the AI model allowlist and region rule) and
+    // src/ai/agentVocabulary.mjs (the in-app agent's arming vocabulary and environment ladder) —
+    // each one the `verify:edge` gate and the runtime must agree on — and a fork may add more
+    // of the same kind. `allowJs` alone would let TypeScript READ such a file as implicit `any`;
+    // `checkJs` holds it to the same `strict` as every .ts here, and keeps a future .js file
+    // from being a hole in the type system rather than part of it. Never `allowJs` without it.
+    "allowJs": true,
+    "checkJs": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  // `.mjs` is listed too, not just picked up as a dependency: `checkJs` only reaches JavaScript
+  // that some root file imports, so a shared module consumed ONLY by scripts/ (the very shape
+  // readAuditVocabulary.mjs establishes) would otherwise sit outside the program entirely —
+  // untyped, unchecked, and silent about it.
+  "include": ["src/**/*.ts", "src/**/*.mjs"],
+  "exclude": ["templates"]
+}

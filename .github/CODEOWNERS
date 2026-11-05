@@ -1,0 +1,79 @@
+# Protected core — these paths carry the security invariants. Changes should get a
+# platform-owner review; feature work in src/routes/ and web/ deliberately does NOT.
+#
+# Today this is review-ROUTING, not a hard merge gate: GitHub branch protection is
+# deliberately off (DECISIONS 2026-06-12), so the enforced gate is the PR convention +
+# the guard-bash hook. CODEOWNERS only auto-requests review when the owner below is a
+# collaborator on the repo — so in a FORKED app repo, repoint @yonico to that app's owner
+# (ideally a CialDNB org TEAM, e.g. @CialDNB/<team>, which survives forking; none exists
+# for this yet — see OPEN-QUESTIONS B4). Add a second owner to close the bus-factor (B4).
+#
+# Multi-person apps: see docs/COLLABORATION.md. A second person is the trigger to turn branch
+# protection ON (require PR + CI + Code Owner review) — that's when CODEOWNERS becomes a real merge
+# gate. Until then it stays advisory, so it never blocks a solo builder. To list two owners, put
+# both on the line, e.g.:  /src/auth/   @owner-a @owner-b
+
+# --- worker / framework / security-bearing source ---
+/src/framework/         @yonico
+/src/auth/              @yonico
+/src/data/              @yonico
+/src/email/             @yonico
+/src/security/          @yonico
+/src/ai/                @yonico
+/src/cron/              @yonico
+/src/mcp/               @yonico
+/src/platform/          @yonico
+/src/index.ts           @yonico
+/src/health.ts          @yonico
+/src/env.ts             @yonico
+# The in-app agent's client (the AG-UI stream, the panel's reducer and state, the UI-intent
+# allowlist) — it renders model output and turns it into navigation, so it is core like src/ai/,
+# even though it lives under web/. The rest of web/ stays feature territory.
+/web/src/agent/         @yonico
+
+# --- schema, migrations, and the security headers (mirrored worker + SPA) ---
+/schema.sql             @yonico
+/migrations/            @yonico
+/web/public/_headers    @yonico
+
+# --- gates, harness, and build/config ---
+/semgrep/               @yonico
+/test/isolation/        @yonico
+/test/helpers/          @yonico
+# The test runtimes: the reviewed manifests that move a suite out of full Workers, the minimal
+# Worker and its config, and the Node project's network guard (docs/TESTING.md).
+/test/projects.mjs      @yonico
+/test/runtime/          @yonico
+/test/setup/            @yonico
+/test/platform/source-hygiene.test.mjs @yonico
+/.github/               @yonico
+/.claude/               @yonico
+/.githooks/             @yonico
+/scripts/               @yonico
+/wrangler.jsonc         @yonico
+/wrangler.staging.jsonc @yonico
+/wrangler.test.jsonc    @yonico
+# The reviewed grant for private-database bindings. Cloudflare has no per-Worker scope for a
+# Hyperdrive / Workers VPC binding, so this file IS the boundary — it and the wrangler configs
+# above must move together, in one reviewed PR. See docs/DATA-ROUTES.md.
+/binding-allowlist.jsonc @yonico
+/tsconfig.json          @yonico
+# All three typecheck configs (`npm run typecheck` runs each): loosening the test or SPA one
+# weakens the gate exactly as loosening the worker's does.
+/test/tsconfig.json     @yonico
+/web/tsconfig.json      @yonico
+/vitest.config.ts       @yonico
+# The app's test-performance budget: the limits, job names and comparison files the CI
+# observer reads. Raising a limit to quiet a sustained warning is a change to the evidence.
+/test-performance-budget.json @yonico
+/biome.json             @yonico
+
+# --- agent guidance (the working agreement + its cross-tool mirrors + drift guard) ---
+# CLAUDE.md is canonical; AGENTS.md symlinks to it; the Cursor rule + PLAYBOOKS are curated
+# mirrors kept honest by verify:agents (docs/agent-guidance.sync.json). Edits here change how
+# every builder — in any editor — is steered, so they carry a code-owner review.
+/CLAUDE.md                      @yonico
+/AGENTS.md                      @yonico
+/.cursor/                       @yonico
+/docs/PLAYBOOKS.md              @yonico
+/docs/agent-guidance.sync.json  @yonico

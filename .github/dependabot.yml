@@ -1,0 +1,31 @@
+# Keeps the SHA-pinned GitHub Actions current: Dependabot bumps the commit SHA and the
+# `# vN` comment together, so pinning for supply-chain safety doesn't freeze us on stale
+# (potentially vulnerable) action versions.
+#
+# npm gets routine version updates too, not just security alerts: minor + patch bumps
+# arrive grouped into one weekly PR, while majors stay individual PRs so each can get
+# migration attention. With ~15 direct dependencies the noise stays low, and staying
+# current is the cheap defense against npm supply-chain attacks.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch

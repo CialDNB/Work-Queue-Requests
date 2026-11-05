@@ -1,0 +1,85 @@
+{
+  // Which private-database and private HTTP service bindings this app may declare, per
+  // deploying wrangler config.
+  //
+  // WHY THIS FILE EXISTS. A Hyperdrive binding is `{ binding, id }` and a Workers VPC binding
+  // is `{ binding, service_id }` — neither carries any per-Worker ACL, and the Cloudflare
+  // permissions that gate them (`Hyperdrive Read`, `Connectivity Directory Bind`) are flat
+  // ACCOUNT permissions with no per-resource scope. So any Worker in the account whose deploy
+  // credential holds those scopes can read a database by naming its id. Cloudflare offers no
+  // technical boundary below the account; this file is the reviewed one.
+  //
+  // WHY IT IS A REAL GATE HERE. Production deploys run only through GitHub Actions and no repo
+  // user holds a Cloudflare token, so a binding cannot reach production without passing the CI
+  // check that reads this file. That makes it enforcement rather than convention — but only as
+  // strong as who can change the workflow, so this file and the workflows are CODEOWNERS-gated
+  // together.
+  //
+  // HOW TO ADD ONE. The id comes from a Pulumi stack output in Cial-Pulumi-VPC. Put the binding
+  // in the wrangler config and the id here IN THE SAME PULL REQUEST — that pairing is the thing
+  // the code owner reviews. An id listed here but bound nowhere fails the check too: a grant
+  // nobody uses is a grant nobody re-examines.
+  //
+  // NAMING IS LOAD-BEARING. Bindings must be named HYPERDRIVE_* / VPC_*, because the semgrep
+  // fence that keeps database access out of route code matches on that prefix. A binding named
+  // anything else would pass the fence silently, so the check rejects it here.
+  //
+  // EVERY GRANT DECLARES A CLASS. A grant is an object, never a bare id:
+  //
+  //     { "id": "3f1c…", "class": "client" }
+  //
+  //   "client"   — client data is behind this binding. src/data/aurora.ts takes the FAIL-CLOSED
+  //                write-ahead path for it: the read_log intent row is inserted and AWAITED
+  //                before the query runs, and a read that cannot be recorded does not happen.
+  //                A config binding one of these must also declare the ledger armed —
+  //                "vars": { "READ_AUDIT": "on" } — or CI refuses it. Read attribution is the
+  //                compensating control for client data living on a shared Cloudflare account,
+  //                so the binding and the trail land together or neither does.
+  //   "internal" — no client data. Fire-and-forget ledger flush; a read never blocks on it.
+  //
+  // There is no default, on purpose. Defaulting to "internal" would silently downgrade a client
+  // database to the weaker posture, which is exactly the mistake this file exists to prevent.
+  // The class is a property of the DATABASE, decided here where it is reviewed — never by an
+  // individual query, which could otherwise pick the cheaper branch for itself. Each granted
+  // source also needs a matching entry in AURORA_SOURCES (src/data/aurora.ts); the same CI check
+  // cross-references the two.
+  //
+  // HTTP SERVICES ARE A THIRD CLASS, ON vpc_services ONLY. A Workers VPC service can front an
+  // HTTP service instead of a database — an on-premises gateway published through a Cloudflare
+  // Tunnel. On a DB Israel app the central catalog grants it, and delivery binds it as
+  // VPC_<SERVICE> with its host in the plain var VPC_<SERVICE>_HOST; the service id comes from
+  // the app's onboarding receipt. Grant it here as:
+  //
+  //     { "id": "01a1…", "class": "http" }
+  //
+  //   "http"     — an HTTP service, not a database: no read ledger posture, no AURORA_SOURCES
+  //                entry, no READ_AUDIT arming. Instead the config must set
+  //                "vars": { "VPC_<SERVICE>_HOST": "<host>" }, and the service must be
+  //                registered in PRIVATE_SERVICES (src/data/privateServices.ts) with the name of
+  //                the secret holding its credential — the transport that is the only way to
+  //                call it, and that sends that credential on every request. A name registered
+  //                as both a database and an HTTP service fails. If the service returns client
+  //                records, it is also an upstream source: see docs/DATA-ROUTES.md.
+  //
+  // hyperdrive and vpc_networks grants take "client" or "internal" only: Hyperdrive is always
+  // a database, and a network binding reaches a whole tunnel.
+  //
+  // The kit itself binds no private database; both lists ship empty. Forks fill them in.
+  // See docs/DATA-ROUTES.md for the consuming side.
+
+  "wrangler.jsonc": {
+    // PRODUCTION. An app that is staging-only leaves this empty — that emptiness is what
+    // stops it reaching production data, and it is enforced, not merely intended.
+    "hyperdrive": [],
+    "vpc_services": [],
+    // A network binding reaches an ENTIRE tunnel — or the whole account with "cf1:network".
+    // Listing one here is a decision to write down, not a routine grant.
+    "vpc_networks": []
+  },
+
+  "wrangler.staging.jsonc": {
+    "hyperdrive": [],
+    "vpc_services": [],
+    "vpc_networks": []
+  }
+}

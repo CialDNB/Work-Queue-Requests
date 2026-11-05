@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Editor-agnostic git hook (install once per clone: npm run hooks:install, which points
+# core.hooksPath here). Runs for Cursor, VS Code, JetBrains, and plain git — not just Claude
+# Code, whose own guard-bash hook is wired separately via .claude/settings.json. The guard
+# LOGIC lives in the CODEOWNERS-protected .claude/hooks/lib/; this file is a thin dispatcher.
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+
+# 1) Block commits on a protected branch (twin of guard-bash's onProtectedBranch rule).
+node "$root/.claude/hooks/lib/block-protected-commit.mjs" || exit 1
+
+# 2) Block committing a local secrets file (.env, .dev.vars, .secrets.json), even force-added,
+#    and a real value pasted into a committed .example template.
+node "$root/.claude/hooks/lib/block-secret-commit.mjs" || exit 1
+
+# 3) Tiered checks: typecheck + lint (full suite under PAVEDROAD_PRECOMMIT_FULL=1;
+#    skip with PAVEDROAD_SKIP_PRECOMMIT=1). CI is still the real wall.
+exec bash "$root/scripts/pre-commit.sh"

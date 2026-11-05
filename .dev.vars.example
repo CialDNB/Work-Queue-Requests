@@ -1,0 +1,45 @@
+# Copy to .dev.vars (gitignored) for local `wrangler dev`. NEVER commit real values.
+# In deployed environments these are Worker secrets (wrangler secret put <NAME>)
+# or account Secrets Store bindings — see docs/IMPLEMENTATION-HANDBOOK.md.
+
+# Anthropic API key — only needed if your app makes AI calls.
+ANTHROPIC_API_KEY=sk-ant-REPLACE_ME
+
+# Cloudflare AI Gateway token (cf-aig-authorization). Leave unset to call the
+# Anthropic API directly (the client logs a warning and falls back).
+AI_GATEWAY_TOKEN=
+
+# Failure alerting (A4). ALERT_EMAIL (comma-separated) lives in wrangler vars; the
+# central Slack channel is a SECRET — a Slack incoming-webhook URL. Set it here for
+# local testing and as a Worker secret in deployed envs (`wrangler secret put
+# ALERT_WEBHOOK_URL`). Leave unset to alert by email only.
+ALERT_WEBHOOK_URL=
+
+# Cloudflare Turnstile (login bot-challenge). Leave BOTH empty to keep it disabled locally
+# (the default). To exercise it: set TURNSTILE_SITE_KEY (also a wrangler var) and the secret
+# here. In deployed envs the site key is a wrangler var (the fleet-shared widget key) and the
+# secret is the FLEET-SHARED PAVED_ROAD_TURNSTILE_SECRET in the account Secrets Store — one
+# widget for every kit app, not per-app. See docs/SECURITY-EDGE.md.
+TURNSTILE_SITE_KEY=
+TURNSTILE_SECRET=
+
+# Fleet self-report (AICOE-355). Set BOTH to arm the daily report_to_registry cron, which POSTs
+# this app's live status (health/version/backup+heartbeat age) to the App Registry's ingest so
+# the fleet catalogue shows it. Leave either unset to keep the cron DORMANT (the default).
+# REGISTRY_URL is a wrangler var; REGISTRY_TOKEN is a member-role t_* token minted in the
+# registry app (a Worker secret in deployed envs).
+REGISTRY_URL=
+REGISTRY_TOKEN=
+# At-rest field sealing (Sensitive-Data Protection capability — OPT-IN, dormant by default).
+# Only needed if your app seals a high-sensitivity field locally. 64 hex chars (32 bytes).
+# Generate-and-vault-first in deployed envs: `node scripts/seal-key.mjs --print` then
+# `wrangler secret put SEAL_KEY` (per-app, per-env, distinct). LOSE IT → LOSE THE DATA.
+# For LOCAL dev only, any throwaway 64-hex value works. See docs/runbooks/sensitive-data-key.md.
+SEAL_KEY=
+
+# Local first login (GUIDEBOOK "First login"). `wrangler dev` reads APP_ENV=production from
+# wrangler.jsonc, where an undelivered magic link goes nowhere. To have yours parked in the local
+# KV outbox instead, set BOTH: APP_ENV=development and your address (comma-separate several).
+# Then: npx wrangler kv key get --binding SESSIONS "magic-link-outbox:<you, lowercase>" --local
+# APP_ENV=development
+# MAGIC_LINK_OUTBOX=you@cialdnb.com

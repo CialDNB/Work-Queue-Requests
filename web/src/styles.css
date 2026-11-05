@@ -1,0 +1,312 @@
+/* Kit baseline styles — clean, neutral, CIAL-blue accent via CSS variables.
+   Swap the variables to rebrand; keep the structure. */
+:root {
+  --accent: #0050f0;
+  --accent-soft: #e6eeff;
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --text: #16191f;
+  --muted: #687078;
+  --border: #e3e6ea;
+  --danger: #c0392b;
+  --radius: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.app {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 0 20px 40px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 17px;
+}
+
+.brand.big {
+  font-size: 22px;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.brand-mark {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--accent), #00d2ff);
+  display: inline-block;
+}
+
+nav {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+}
+
+.tab {
+  background: none;
+  border: none;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Settings sub-nav — the grouped account/platform surfaces (kit convention, DECISIONS 2026-08-03). */
+.subnav {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin: -12px 0 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.subtab {
+  background: none;
+  border: none;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.subtab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.subhead {
+  margin-top: -8px;
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+
+.userbox {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+}
+
+main {
+  min-height: 60vh;
+}
+
+footer {
+  margin-top: 48px;
+  font-size: 13px;
+  text-align: center;
+}
+
+.centered {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.card.login {
+  width: 360px;
+  padding: 28px;
+}
+
+.card.highlight {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  word-break: break-all;
+}
+
+.list {
+  list-style: none;
+  padding: 0;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.row.spread {
+  justify-content: space-between;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 100%;
+  margin-bottom: 8px;
+  background: var(--surface);
+}
+
+.row input,
+.row select {
+  width: auto;
+  flex: 1;
+  margin-bottom: 0;
+}
+
+textarea {
+  min-height: 70px;
+  resize: vertical;
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  padding: 9px 16px;
+  border-radius: var(--radius);
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.ghost {
+  background: none;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
+button.ghost.danger {
+  color: var(--danger);
+}
+
+/* "Sign in with Microsoft" — an anchor styled as a secondary button (the SSO entry is a
+   top-level GET navigation, not a form submit; see Login.tsx). */
+.btn-microsoft {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.btn-microsoft:hover {
+  border-color: var(--accent);
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+th {
+  background: var(--bg);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.disabled-row {
+  opacity: 0.55;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 12px;
+}
+
+.error {
+  color: var(--danger);
+}
+
+code {
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}

@@ -1,0 +1,117 @@
+# One-off, manual: provision the PRODUCTION Cloudflare resources and apply the schema.
+# Runs scripts/provision.mjs (creates D1/KV/R2, VERIFIES the fleet-shared AI gateway
+# `all-pr-apps` read-only — per-app tokens never create it (DECISIONS 2026-08-28) — and no
+# token minting: AI_GATEWAY_TOKEN is a per-Worker secret set on first deploy — fills
+# the PLACEHOLDER_RUN_PROVISION ids in wrangler.jsonc, regenerates RESOURCES.md),
+# then applies schema.sql to the production D1. It does NOT deploy and does NOT commit —
+# it uploads the filled config as an artifact so the real ids get committed via a normal PR.
+# The recurring production deploy is the separate "Deploy production" workflow (deploy-prod.yml),
+# run after the docs/GO-LIVE.md sign-off.
+#
+# Why CI, not a laptop: provisioning authenticates with the account-scoped CLOUDFLARE_API_TOKEN
+# (a repo secret, write-only — a laptop can't read it) instead of whatever Cloudflare account a
+# laptop's `wrangler login` happens to hold, so you never touch the token locally and every prod
+# provision is auditable in the Actions log. Mirrors provision-staging.yml's steps, with the
+# added production-environment approval gate described below.
+#
+# GO-LIVE discipline is preserved: this job uses `environment: production`, so adding the
+# go-live owner as a REQUIRED REVIEWER on that environment (repo Settings → Environments →
+# production) blocks each run until they approve — the same human gate deploy-prod.yml uses.
+# This touches production (creates resources, writes the schema, optionally seeds the first
+# owner), so it sits behind the same sign-off as the deploy.
+#
+# Re-runnable: provision.mjs is idempotent (create-or-reuse). Needs CLOUDFLARE_API_TOKEN
+# scoped per handbook §8.1 (AI Gateway READ only; DECISIONS 2026-08-28).
+name: Provision production (one-off)
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_owner_email:
+        description: "Optional: seed this address as a production owner (invite-only login)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  deployment-target:
+    # CIAL apps only: a DB Israel app's resources come from the central catalog, so
+    # scripts/deployment-target.mjs refuses it here, and on an invalid deployment marker or a sign
+    # of a DB Israel app with no marker. It reads the ref this run was dispatched from and the
+    # default branch (checked out into a directory of its own), so a branch that deleted the
+    # marker cannot turn the CIAL path back on. provision-production needs this job, so on a
+    # refusal it never reaches the production environment. It installs nothing, and neither
+    # checkout keeps a token. See docs/DECISIONS.md 2026-10-27.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .default-branch
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Refuse unless this ref is a CIAL app
+        run: node scripts/deployment-target.mjs --require cial
+      - name: Refuse unless the default branch is a CIAL app
+        run: node scripts/deployment-target.mjs --require cial --root .default-branch
+
+  provision-production:
+    needs: [deployment-target]
+    runs-on: ubuntu-latest
+    # Surfaces in the Environments view + deployment history, and is the hook for the
+    # go-live owner as a required-reviewer approval gate (see header).
+    environment: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Provision production resources
+        run: node scripts/provision.mjs --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Apply schema to the production D1
+        run: npm run db:apply
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Seed the first owner (optional — invite-only login)
+        if: ${{ inputs.seed_owner_email != '' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          OWNER: ${{ inputs.seed_owner_email }}
+        run: |
+          # shellcheck disable=SC2153  # OWNER is provided by the step's env: block above
+          # Conservative email regex — no quotes/spaces, so the value is injection-safe
+          # to inline into the SQL below.
+          if ! printf '%s' "$OWNER" | grep -qE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'; then
+            echo "::error::seed_owner_email '$OWNER' is not a valid address"; exit 1
+          fi
+          owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          npx wrangler d1 execute DB --remote \
+            --command "INSERT INTO users (email, name, role, added_by) VALUES ('${owner}', 'Production Owner', 'owner', 'bootstrap') ON CONFLICT(email) DO UPDATE SET role='owner', disabled_at=NULL"
+          echo "Seeded ${owner} as a production owner." >> "$GITHUB_STEP_SUMMARY"
+      - name: Summarize the provisioned config (commit these ids)
+        run: |
+          {
+            echo "### Production provisioned — commit the filled ids into wrangler.jsonc"
+            echo '```jsonc'
+            cat wrangler.jsonc
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wrangler-production-provisioned
+          path: |
+            wrangler.jsonc
+            docs/RESOURCES.md
+          if-no-files-found: error

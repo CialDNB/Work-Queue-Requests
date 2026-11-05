@@ -1,0 +1,20 @@
+# Baseline whitespace rules for every editor (Cursor, VS Code, JetBrains, …). Mirrors
+# biome.json (the source of truth, a HARD CI gate). biome owns JS quote/semicolon/trailing-comma
+# style, which .editorconfig can't express — install the biome extension (see .vscode/extensions.json)
+# for full format parity. Without it, at least whitespace matches and `npm run lint` stays green.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+max_line_length = 100
+
+[*.md]
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

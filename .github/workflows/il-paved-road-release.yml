@@ -1,0 +1,13 @@
+# Central delivery request (docs: CialDNB/il-paved-road-deployment/docs/APP-REPOSITORY-INTEGRATION.md).
+# Managed by the platform; changes are blocked by the repository workflow-path ruleset.
+name: il-paved-road-release
+on:
+  push:
+    branches: [main]
+    tags: ['production/*']
+permissions: {}
+jobs:
+  notify:
+    uses: CialDNB/il-paved-road-deployment/.github/workflows/request-release.yml@main
+    secrets:
+      IL_PAVEDROAD_TRIGGER_APP_PRIVATE_KEY: ${{ secrets.IL_PAVEDROAD_TRIGGER_APP_PRIVATE_KEY }}

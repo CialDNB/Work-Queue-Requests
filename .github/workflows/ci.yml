@@ -1,0 +1,544 @@
+# CI for every push/PR + auto-deploy to STAGING on main (production is always manual).
+# Every gate hard-fails — no gate step or job has continue-on-error. Only evidence does: the
+# timing-artifact upload in test-suite, and the test-performance observer job and its upload.
+# CI never calls the AI gateway.
+#
+# The required `test` check is an aggregate: the static gates (test-gates) and the full suite
+# with coverage (test-suite) run in parallel, and `test` passes only when both succeed.
+#
+# On PRs, the `test-performance` observer runs after every required check has passed. It reads
+# this run's job timings with a read-only token and reports the complete gate's latency and
+# runner-minutes against the app's own budget (test-performance-budget.json). It is not a gate:
+# it is not a required check, nothing needs it, and it continues on error, so a red observation
+# leaves the run green. Main's tree memo below still needs the PR's whole run to have finished
+# green, so a merge made before the observer finishes costs one full gate run on main.
+#
+# On pushes to main, the `gate` job first checks whether the pushed TREE is
+# byte-identical to a tree that already passed this workflow on its PR (the
+# normal squash-merge case under the PR-based flow) — if so test-gates, test-suite,
+# `test` and semgrep are skipped and the deploy rides the PR's green run ("test the tree,
+# not the commit", adopted from docshub; see docs/DECISIONS.md 2026-06-12).
+# Any doubt falls back to the full suite. actionlint + gitleaks still run on
+# every push: they're seconds, and gitleaks scans history — the squash commit
+# itself — that the PR run never saw.
+#
+# The deploy job is DORMANT until two things are set on the GitHub repo:
+#   1. Repo variable DEPLOY_ENABLED = "true"
+#   2. Repo secret CLOUDFLARE_API_TOKEN = the app's scoped token (see docs/RESOURCES.md)
+# and it deploys only a CIAL app: the deployment-target job must succeed and say so. A DB Israel
+# app is released by the central pipeline instead, and deploy-staging skips.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A read-only token for every job that does not set its own `permissions:` (the gate job sets
+# its own, to read PRs and workflow runs). Without this block a job gets the repository default,
+# which is write here, and test-gates and test-suite run `npm ci` lifecycle scripts with the
+# token that actions/checkout keeps in .git/config. A job that needs more names it in its own
+# block, and a write scope goes only on a job that installs nothing (DECISIONS 2026-10-22).
+permissions:
+  contents: read
+
+# Superseded PR runs are cancelled (nobody needs CI on a stale push), but a run on MAIN is
+# never cancelled mid-flight: it may be inside deploy-staging — mid-D1-migration or
+# mid-wrangler-deploy — and run-level cancellation kills running jobs regardless of any
+# job-level concurrency group (a job-level stanza CANNOT fix this). Queued-but-unstarted
+# main runs still supersede latest-wins, which is the deploy semantics we want. The
+# non-cancelling pattern matches deploy-prod.yml and edge-live.yml. AICOE-454.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    # Tree-hash memo: a squash-merge mints a new commit SHA but — when main
+    # hasn't moved under the PR — a byte-identical tree to the PR head that
+    # CI just passed. This job resolves the merged PR via the commit→PR
+    # association API pinned by merge_commit_sha (NOT by parsing the squash
+    # subject: a single-commit PR can squash with the bare commit subject,
+    # no "(#N)", which would silently defeat the memo for the most common
+    # PR shape), fetches that PR's head-commit tree, confirms a successful
+    # run of THIS workflow file from THIS repo exists for that head SHA,
+    # and compares trees. ANY doubt — direct push, API hiccup, tree
+    # mismatch because main moved under the PR — resolves to tested=false
+    # and the full suite runs; every lookup is failure-guarded so an API
+    # blip answers false instead of going red. Nothing deploys unless the
+    # exact shipped tree passed CI, now or on its PR. The memo trades no
+    # coverage: tests, vitest config, semgrep rules, and this workflow all
+    # live inside the compared tree. Accepted residuals: DECISIONS
+    # 2026-06-12.
+    name: was this tree tested?
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      tested: ${{ steps.memo.outputs.tested }}
+    steps:
+      - name: Look up the pushed tree among PR-tested trees
+        id: memo
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The push payload carries the pushed commit's tree id — no
+          # checkout needed; an empty value can never equal a real tree.
+          TREE: ${{ github.event.head_commit.tree_id }}
+        run: |
+          tested=false
+          # This workflow's own path, derived so a rename can't silently
+          # desynchronize the run filter (garbled -> no match -> fail-safe).
+          wf_path="${GITHUB_WORKFLOW_REF#"${GITHUB_REPOSITORY}"/}"
+          wf_path="${wf_path%%@*}"
+          pr_head=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq "(first(.[] | select(.merged_at != null and .merge_commit_sha == \"${GITHUB_SHA}\") | .head.sha)) // empty" 2>/dev/null || true)
+          if [ -n "${pr_head:-}" ] && [ -n "${TREE:-}" ]; then
+            pr_tree=$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${pr_head}" --jq .tree.sha 2>/dev/null || true)
+            if [ "${pr_tree:-}" = "$TREE" ]; then
+              # Trees match — now require the green evidence. Filter by
+              # workflow file PATH (a second workflow could reuse the display
+              # name) and by same-repo head (a fork PR's run executes the
+              # fork's own workflow definition and proves nothing).
+              green=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${pr_head}&status=success&per_page=100" \
+                --jq "[.workflow_runs[] | select(.path == \"${wf_path}\" and .head_repository.full_name == \"${GITHUB_REPOSITORY}\")] | length" 2>/dev/null || echo 0)
+              if [ "${green:-0}" -ge 1 ]; then
+                tested=true
+              fi
+            fi
+          fi
+          echo "pushed tree ${TREE:-?}; PR head ${pr_head:-none} tree ${pr_tree:-?}; green same-repo runs of ${wf_path} on head: ${green:-not queried}"
+          echo "tested=${tested}" >> "$GITHUB_OUTPUT"
+          echo "tree memo verdict: tested=${tested}" >> "$GITHUB_STEP_SUMMARY"
+
+  test-gates:
+    # The static gates: every check behind the required `test` check except the suite itself.
+    # They run beside test-suite, not before or after it, so one push reports a red gate and a
+    # red suite together; `test` below requires both.
+    #
+    # Always runs on PRs; on pushes to main only when the gate couldn't
+    # prove the tree was already tested. `!cancelled()` is load-bearing: on
+    # PRs the gate job is SKIPPED (it's push-only), and a skipped dependency
+    # would normally skip this job too — with it, the `tested` check still
+    # evaluates (a skipped job's outputs are empty, != 'true').
+    #
+    # GitHub's default job timeout is 360 minutes. These gates take about a minute; 20 turns a
+    # stuck step (a network retry in verify:deps, a hook test that never exits) into a failed job,
+    # and so a red `test`, well before that.
+    needs: [gate]
+    if: ${{ !cancelled() && needs.gate.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # Lint is a HARD gate: any biome diagnostic fails CI.
+      - run: npm run lint
+      - run: npm run build:web
+      # Hook guards (e.g. guard-bash.mjs) run in plain Node, not the Workers test pool.
+      - run: npm run test:hooks
+      # Pins the plain-JS script mirrors against their TS canonicals (provision.mjs ↔ naming.ts
+      # + the AI Gateway payload; new-app.mjs ↔ bootstrap.ts) via node --test.
+      - run: npm run test:scripts
+      # Protected-core reachability: a route module that never reaches `allRoutes`, or a
+      # src/data/ export nothing in src/, web/src/, or test/ calls, fails here. Neither is
+      # visible to any other gate — the uniformity tripwire ITERATES `allRoutes`, so an
+      # unregistered route module is unseen rather than untested, and coverage thresholds are
+      # ratios that dead code drags without ever failing. Deliberately unwired scaffolding
+      # (src/data/groups.ts) declares itself with an `@reachability-exempt:` marker carrying a
+      # reason, and every exemption is printed in the report so the escape hatch is visible in
+      # review. The same command also prints protected-core file sizes against a REPORT-ONLY
+      # ceiling — never a failure, so a fork already over it stays green. Enumerated here and
+      # not just in `npm run ci`: that split is how verify:plugin below stayed invisible on
+      # GitHub for a whole release.
+      - run: npm run verify:core
+      # Route least-privilege coverage: how many defineRoutes declare `needs` (the repositories
+      # their handler may reach through `ctx.db`) and, by name, which do not. REPORT ONLY — it
+      # always exits 0, so it can never red a fork. `needs` is opt-in by construction: ~268
+      # defineRoutes across ~17 forks declare nothing, and gating on it today is a mandatory
+      # field by another name. The count is what has to move before the gate can exist, which is
+      # why it runs in CI where every PR sees it rather than only in someone's local `npm run
+      # ci`. It graduates on a COVERAGE THRESHOLD, not a date — see the `verify:needs` stanza in
+      # docs/DECISIONS.md; the flip is `-- --gate`, already implemented and pinned by tests.
+      - run: npm run verify:needs
+      # Bootstrap tripwire in CI: any residual TEMPLATE identifier (the template's kebab slug /
+      # SCREAMING_SNAKE secret prefix) + carried-over template staging ids. INERT on the template
+      # itself (it legitimately carries its own identity everywhere), and LIVE on every app once it adopts this step
+      # via /kit-upgrade, so a stale identifier that stays green in the test suite can't slip
+      # through. Deliberately NOT the pre-provision placeholder check (that false-positives
+      # once an app provisions its own ids — see DECISIONS 2026-06-17).
+      - run: npm run verify:bootstrap
+      # Edge-hardening guard: every deploying wrangler config must keep workers.dev + preview
+      # URLs OFF (the custom domain is the only ingress, so the zone WAF / rate limiting cover
+      # all traffic). LIVE on every app once adopted via /kit-upgrade — a fork that pulls this
+      # step but hasn't set the flags gets a red CI until it does. See docs/SECURITY-EDGE.md.
+      - run: npm run verify:edge
+      # Kit-migration guard: every kit migration pinned in scripts/kit-migrations.json must have a
+      # copy in migrations/d1/ — matched by CONTENT (comments and whitespace aside), under whatever
+      # number the fork gave it. migrations/ does not ride /kit-upgrade, the core that needs the new
+      # shape does, and the test harness applies schema.sql, so a missing copy is otherwise first
+      # seen in production. In the kit itself it also holds the manifest to the folder (every kit
+      # migration pinned, none edited after pinning). Invoked as `node …` rather than `npm run` on
+      # purpose: scripts/ and .github/ travel in the /kit-upgrade diff set, package.json does not,
+      # so the step and the script always arrive together. See DECISIONS 2026-09-25.
+      - run: node scripts/check-kit-migrations.mjs
+      # Test-performance budget guard: test-performance-budget.json must hold valid limits,
+      # comparison files that all exist, and job names this workflow shows (each required job's
+      # `name:` or id, and the suite job's prefix), which are what the observer below reads.
+      # Offline, and a hard gate, so a budget that cannot be read or no longer names this
+      # workflow's jobs fails here and not as a silent "unavailable" in the observer. An app with no budget file has not adopted one: the step prints a notice
+      # and passes, so a fork that takes this workflow before its budget stays green. Invoked as
+      # `node …` for the same reason as the kit-migration guard above: package.json does not ride
+      # /kit-upgrade. See docs/TESTING.md, "App-owned budgets and the CI observer".
+      - run: node scripts/test-performance.mjs check
+      # Agent-guidance drift guard: the curated cross-tool mirrors (AGENTS.md, the Cursor rule,
+      # docs/PLAYBOOKS.md) must stay reconciled with the canonical CLAUDE.md. Tree-only (a content
+      # hash, not a PR diff), so it rides the tree-memo like the other guards. See docs/PLAYBOOKS.md.
+      - run: npm run verify:agents
+      # Skill-artifact guard: every `.claude/skills/<dir>/` must hold a SKILL.md whose
+      # frontmatter declares a `name:` matching the directory plus a `description:` — the two
+      # properties that decide whether the slash-command registers and whether it is reachable.
+      # Checks the FILES only. An earlier cut also regex-matched the six documents that restate
+      # the roster; five review rounds found real defects in that every time (a doc URL became a
+      # phantom skill, a fork's own skill count could only go green by writing a falsehood), so
+      # it was removed — DECISIONS 2026-08-06. Enumerated here, not just in `npm run ci`: that
+      # split is exactly how verify:plugin below stayed invisible on GitHub for a whole release.
+      # Unguarded (no hashFiles) and safe to be: every fork has `.claude/skills/`, and the guard
+      # reads only that directory, so it cannot fail on a fork's own docs or wording.
+      - run: npm run verify:skills
+      # Plugin mirror guard: the plugins/<kit> dir must stay byte-identical to .claude/
+      # (skills + allowlisted hooks). Local `npm run ci` always ran this; CI never did,
+      # so a skill edit that skipped the sync script was invisible on GitHub — found when
+      # a fork-upgrade agent hit it on a byte-identical tree (AICOE-461 rollout).
+      # hashFiles-guarded: forks adopt this workflow wholesale but carry no plugins/ dir —
+      # on a fork the step self-skips. The glob is deliberately name-free: a literal kit
+      # name here trips fork residual tripwires even though the step never runs
+      # (app-registry #57), and a fork that keeps a localized plugins/<app> mirror
+      # (app-pay-management) still gets the guard.
+      - run: npm run verify:plugin
+        if: ${{ hashFiles('plugins/*/sync-from-harness.mjs') != '' }}
+      # Dependency release-age gate: no version in package-lock.json may have been published to
+      # the npm registry in the last 24h — the window in which a hijacked package is typically
+      # caught and unpublished. The `.npmrc` `min-release-age=1` beside it is the resolution-time
+      # half and CANNOT be this gate: `npm ci` installs the lockfile verbatim and does no
+      # resolution, so the config has nothing to filter in the exact place a too-young version
+      # would ride in. Fail-closed on every unknown (missing publish time, a 404, a dead network
+      # after retries, an off-registry dependency). The ONLY step in this job that needs the
+      # network beyond `npm ci`; it talks to registry.npmjs.org, the same host npm already used.
+      # Deliberately NOT hashFiles-guarded — every fork has a package-lock.json, and a fork that
+      # somehow doesn't should go red rather than silently skip a supply-chain gate.
+      #
+      # Safe under the tree memo even though this is the one gate here whose answer depends on the
+      # clock: the lockfile is IN the compared tree (a dependency change is a new tree and gets a
+      # full run), and the verdict is monotonic in time — a version old enough on the PR is only
+      # older at merge. A skip can never turn a red into a green.
+      - run: npm run verify:deps
+
+  test-suite:
+    # The full suite with coverage, on its own runner, under the same tree-memo condition as
+    # test-gates.
+    #
+    # Unsharded on purpose: the kit's suite fits one runner. Preserve the full suite and
+    # measure an app before choosing a shard count or runtimes: test-profile.json records
+    # per-file timings and CPU/runner context around the unchanged coverage command. Clone
+    # adoption, focused local feedback and coverage-safe sharding: docs/TESTING.md (the
+    # sharding recipe itself is DECISIONS 2026-06-12). A clone that shards replaces this job
+    # with its matrix, under this id or its own, and never runs it beside the matrix; `test`
+    # below then needs and reads the matrix, and the merge job if the clone has one.
+    #
+    # Workers runtimes can finish their assertions and then hang on shutdown, and GitHub's
+    # default job timeout is 360 minutes. 30 is about four times the slowest recent kit run
+    # (7.5 minutes). A clone with a longer suite raises it from its own timings rather than
+    # removing it. A timed-out job never ends in success, so `test` fails.
+    needs: [gate]
+    if: ${{ !cancelled() && needs.gate.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Record test runner context
+        run: node scripts/test-profile.mjs start
+      - name: Full suite with coverage and timing report
+        id: coverage
+        run: npm run test:coverage -- --reporter=default --reporter=github-actions --reporter=json --outputFile.json=.test-results/vitest.json
+      # Timing evidence, never a gate: it cannot turn the job green, and only broken wiring (no
+      # started.json) turns it red. The coverage step above keeps its own exit status; summarize
+      # records that outcome (a red step with green assertions stays red), deletes Vitest's raw
+      # report and writes the normalized profile. The upload carries only that file, and an
+      # artifact-service failure shows on the step without failing the job.
+      # test/platform/test-profile.test.mjs pins this wiring and the coverage step against
+      # accidental drift. It is a tripwire, not a lock: a PR can edit both, so review a change
+      # here as a change to the gate (docs/TESTING.md, "What the wiring tests catch").
+      - name: Summarize test timings
+        if: ${{ always() && steps.coverage.outcome != 'skipped' }}
+        env:
+          TEST_STEP_OUTCOME: ${{ steps.coverage.outcome }}
+        run: node scripts/test-profile.mjs summarize
+      - name: Upload test timings
+        if: ${{ always() && steps.coverage.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-profile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .test-results/test-profile.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    # The REQUIRED check: the ruleset requires `test`, `semgrep`, `actionlint` and
+    # `secrets-scan`, and deploy-staging needs `test`. It runs no gate itself. It passes only when
+    # test-gates and test-suite both ended in success in THIS run. Keep the job id `test` and
+    # give it no `name:`: the check is named after the job, and a renamed check leaves the
+    # required one waiting.
+    #
+    # A required job that is SKIPPED reports success to the ruleset, so this `if:` must skip
+    # it only when the jobs it needs are skipped by the tree memo:
+    #   - without `!cancelled()`, the implicit success() skips it on every PR (the push-only gate
+    #     job is skipped there), and `test` passes with failing tests;
+    #   - a term on a needed job's result (`&& needs.test-suite.result == 'success'`) skips it
+    #     exactly when that job fails.
+    # The step below reads the results instead; anything but success, an empty result included,
+    # fails it. A run cancelled before this job finishes marks it cancelled, not skipped, so a
+    # cancel cannot pass it either (DECISIONS 2026-10-22). On a push whose tree the gate proved
+    # tested, this job is skipped with the jobs it needs, and deploy-staging accepts that skip
+    # only together with the gate's proof.
+    #
+    # test/platform/ci-parallel-runtime.test.mjs pins this wiring against accidental drift. It
+    # is a tripwire, not a lock: a PR can edit both, so review a change here as a change to the
+    # gate. A clone that adds a job (a shard matrix, a coverage merge, e2e) lists it in `needs`,
+    # maps its result in `env` and checks it in `run`, and no job this one needs may need it
+    # back (a cycle, which GitHub rejects). The check stays the first step: a clone's shard merge
+    # and coverage floors may follow it, never come before it.
+    needs: [gate, test-gates, test-suite]
+    if: ${{ !cancelled() && needs.gate.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the static gates and the full suite
+        env:
+          STATIC_RESULT: ${{ needs.test-gates.result }}
+          SUITE_RESULT: ${{ needs.test-suite.result }}
+        run: |
+          echo "Static gates: ${STATIC_RESULT:-missing}; full suite and coverage: ${SUITE_RESULT:-missing}"
+          if [ "$STATIC_RESULT" != "success" ] || [ "$SUITE_RESULT" != "success" ]; then
+            echo "::error::the required test check needs both jobs to succeed in this run"
+            exit 1
+          fi
+
+  test-performance:
+    # The read-only observer: complete-gate latency, initial queue, runner-minutes and suite-job
+    # balance for this run, compared with earlier same-repo PR runs that executed the same
+    # configuration. Evidence, never a gate:
+    #   - It runs on PRs only, after every required check (`test`, which itself needs test-gates
+    #     and the suite, plus semgrep, actionlint and secrets-scan) has succeeded in this run.
+    #     `!cancelled()` is load-bearing for the same reason as on `test`: the push-only gate job
+    #     is skipped on PRs, and the implicit success() would skip this job on every PR.
+    #   - Nothing needs it, so it can never fail a required check or hold a deploy. deploy-staging
+    #     and `test` must never list it.
+    #   - It continues on error, and so does its upload. Main's tree memo counts a PR head as
+    #     tested only when the PR's whole run concluded success, and without these a red
+    #     observer (an artifact-service outage, a timeout) would re-run the full gate on every
+    #     push to main. A merge made while it is still running misses the memo all the same.
+    #   - Its token reads job timings (actions) and the merge commit's tree (contents), nothing
+    #     else. It installs nothing (no `npm ci`, so no dependency code runs beside the token),
+    #     and its checkout keeps no token in .git/config.
+    #   - 5 minutes caps it; the script also stops calling the API after 2 minutes.
+    # It fingerprints the merge commit this run executed (GITHUB_SHA), not the PR head, and puts
+    # that fingerprint in the artifact's name, which is how a later run finds the runs that
+    # executed the same configuration. Comparable history reaches back only as far as these
+    # artifacts, so they are kept 90 days (or the repository's maximum, if lower). A missing
+    # budget file prints a notice and passes.
+    # test/platform/ci-parallel-runtime.test.mjs pins this layout against accidental drift.
+    needs: [test, semgrep, actionlint, secrets-scan]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'pull_request'
+          && needs.test.result == 'success' && needs.semgrep.result == 'success'
+          && needs.actionlint.result == 'success' && needs.secrets-scan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Observe complete CI latency and runner budgets
+        id: observe
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/test-performance.mjs ci
+      - name: Upload normalized performance observations
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-performance-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.observe.outputs.config }}
+          path: .test-results/test-performance.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download actionlint (checksum-verified)
+        run: |
+          ver=1.7.7
+          file="actionlint_${ver}_linux_amd64.tar.gz"
+          sha=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+          curl -sSfL "https://github.com/rhysd/actionlint/releases/download/v${ver}/${file}" -o "$file"
+          echo "${sha}  ${file}" | sha256sum -c -
+          tar -xzf "$file" actionlint
+      - run: ./actionlint -color
+
+  secrets-scan:
+    # Always on, even when the memo skips the suite: gitleaks scans HISTORY,
+    # and the squash commit is new history the PR run never saw.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history so secrets buried in earlier commits are caught
+      - name: Download gitleaks (checksum-verified)
+        run: |
+          ver=8.21.2
+          file="gitleaks_${ver}_linux_x64.tar.gz"
+          sha=5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/${file}" -o "$file"
+          echo "${sha}  ${file}" | sha256sum -c -
+          tar -xzf "$file" gitleaks
+      - run: ./gitleaks git --no-banner --redact --verbose .
+
+  semgrep:
+    # Tree-determined like `test` (the rules live in semgrep/, the code in
+    # the tree), so the memo skips it on proven pushes — see the gate job.
+    needs: [gate]
+    if: ${{ !cancelled() && needs.gate.outputs.tested != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      # semgrep 1.97 (via opentelemetry-instrumentation) imports pkg_resources, which
+      # Python 3.12 runners don't ship and setuptools >=81 no longer provides — pin <81.
+      - run: pip install semgrep==1.97.0 'setuptools<81'
+      # Fences data access into src/data/ and bans raw fetch() in routes — see semgrep/.
+      - run: semgrep scan --config semgrep/ --error --metrics=off
+
+  deployment-target:
+    # Which pipeline delivers this app, from scripts/deployment-target.mjs: `cial` = 'true' for a
+    # CIAL app, 'false' for a DB Israel app (the central DB Israel pipeline delivers it) or a
+    # template copy whose bootstrap has not merged. On a push to main only, like
+    # deploy-staging. It fails, and writes no output, on an invalid deployment marker or on a
+    # sign of a DB Israel app with no marker, and in a DB Israel app that still has DEPLOY_ENABLED
+    # or a CLOUDFLARE_API_TOKEN secret; the run is then red and deploy-staging skips. The step gets
+    # both as booleans, never the token. It installs nothing (the reader uses Node built-ins
+    # only), and its checkout keeps no token. See docs/DECISIONS.md 2026-10-27.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cial: ${{ steps.target.outputs.cial }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Resolve the deployment target
+        id: target
+        env:
+          DEPLOY_ENABLED_IS_TRUE: ${{ vars.DEPLOY_ENABLED == 'true' }}
+          CLOUDFLARE_API_TOKEN_IS_SET: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+        run: node scripts/deployment-target.mjs --github-output
+
+  deploy-staging:
+    needs: [gate, test, semgrep, actionlint, secrets-scan, deployment-target]
+    # `!cancelled()` lets this run when test/semgrep were legitimately
+    # skipped by the gate — but it also suppresses the implicit success()
+    # on needs, so every dependency's outcome is re-asserted explicitly:
+    # the gate job itself succeeded, and each suite job ran green in THIS
+    # run or was skipped with the gate having proved this exact tree
+    # already passed on its PR. actionlint + gitleaks gate every deploy
+    # regardless. The deployment-target job must have succeeded AND said
+    # `cial`: a guard that failed, or wrote no output, never ships.
+    if: >-
+      ${{ !cancelled()
+          && github.event_name == 'push' && github.ref == 'refs/heads/main'
+          && vars.DEPLOY_ENABLED == 'true'
+          && needs.deployment-target.result == 'success'
+          && needs.deployment-target.outputs.cial == 'true'
+          && needs.gate.result == 'success'
+          && needs.actionlint.result == 'success'
+          && needs.secrets-scan.result == 'success'
+          && (needs.test.result == 'success'
+              || (needs.test.result == 'skipped' && needs.gate.outputs.tested == 'true'))
+          && (needs.semgrep.result == 'success'
+              || (needs.semgrep.result == 'skipped' && needs.gate.outputs.tested == 'true')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:web
+      # Migrations run BEFORE the new Worker ships, so the schema is in place for the
+      # code that needs it. D1 uses the scoped token already here — no extra setup.
+      # Refuses to migrate a database that says it belongs to a DIFFERENT app — the only
+      # guard that survives a wrong `database_id` in the config. Invoked as `node …` rather
+      # than `npm run` on purpose: scripts/ and .github/ both travel in the /kit-upgrade diff
+      # set, package.json does not, so this way the step and the script always arrive together.
+      - name: D1 ownership preflight (staging)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/check-d1-identity.mjs --env staging
+      - name: Check + apply D1 migrations (staging)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          npx wrangler d1 migrations list DB --remote --config wrangler.staging.jsonc || true
+          npm run db:migrate:staging
+      # Inert unless an app added a STAGING Supabase instance + the SUPABASE_DB_URL_STAGING
+      # repo secret (the by-exception Postgres path); skips cleanly otherwise. Staging gets
+      # its OWN Supabase project, isolated from prod — same posture as the staging D1. See
+      # migrations/supabase/.
+      - name: Apply Supabase migrations (only when SUPABASE_DB_URL_STAGING is set)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_STAGING }}
+        run: npm run db:migrate:supabase
+      - name: Deploy to staging
+        run: npx wrangler deploy --config wrangler.staging.jsonc --var APP_BUILD_VERSION:${{ github.sha }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Smoke check /_health
+        run: bash scripts/smoke-health.sh "https://staging-work-queue-requests.cialdnb.ai/_health"
+      # Live edge-drift check on the JUST-DEPLOYED worker: HTTP-only here (security headers +
+      # Turnstile survive to the client). Deliberately NO Cloudflare API token in this BLOCKING
+      # deploy gate — the CF-API inventory (workers.dev / WAF / rate-limit) is the daily edge-live
+      # Action's job, where a red is a monitor alert, not a shipping blocker. A CF-API blip or an
+      # authz/scope quirk must never red a deploy that already passed smoke. The check prints an
+      # INCOMPLETE banner for the skipped CF-API checks and exits 0. See docs/SECURITY-EDGE.md.
+      - name: Verify edge controls are live (staging, HTTP-only)
+        run: npm run verify:edge:live -- --env staging

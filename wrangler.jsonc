@@ -1,0 +1,242 @@
+// Local development and tests only. DB Israel central delivery ignores this file; bindings, vars,
+// crons and hostnames come from the central catalog. See docs/CENTRAL-DELIVERY.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "work-queue-requests",
+  "main": "src/index.ts",
+  "account_id": "00000000000000000000000000000000",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // Log hygiene (KIT-MANAGED, enforced by `npm run verify:edge`; PIA C5): Workers Logs keep every
+  // line 7 days and cannot delete one. Our own lines go through logEvent(); the platform's
+  // per-request INVOCATION record would add the request URL — `/auth/verify?token=<live token>`,
+  // `/api/users/<address>` — so it is off. Do not turn it on. See docs/DECISIONS.md 2026-09-23.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false }
+  },
+  "placement": { "mode": "smart" },
+
+  // Source maps OFF, explicitly (DECISIONS 2026-10-25, upload_source_maps). From wrangler 4.150.0
+  // a config WITHOUT this key uploads source maps on every deploy, each embedding the full original
+  // source of src/ and its bundled dependencies. Off keeps the deploy artifact what it was; turning
+  // them on is a separate, recorded decision. Do not delete the key: absent now means on.
+  "upload_source_maps": false,
+
+  // Edge-hardening (KIT-MANAGED, enforced by `npm run verify:edge`): the custom domain is
+  // the ONLY ingress. The default `*.workers.dev` hostname + preview URLs bypass the zone's
+  // WAF + rate-limiting rules, so both are disabled. Do not flip these on. See docs/SECURITY-EDGE.md.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/auth/*", "/_health", "/mcp"]
+  },
+
+  // Crons, dispatched by `controller.cron` in src/cron/index.ts:
+  //  - "0 3 * * *"  daily ops loop: heartbeat + D1→R2 backup + prune. See src/cron/.
+  //  - "0 * * * *"  hourly control-plane tripwire (Sensitive-Data Protection capability, OPT-IN):
+  //                 scans the Cloudflare Audit Log for changes to this app's resources made
+  //                 outside the deploy pipeline (src/cron/auditWatch.ts). DORMANT until
+  //                 AUDIT_API_TOKEN is set (see the commented secret binding below) — without it
+  //                 the tick no-ops and audits a skip. First run only sets the cursor.
+  // Daily ops cron: heartbeat + D1→R2 backup + prune. See src/cron/.
+  // The SECOND entry ("0 * * * *") is the OPT-IN hourly control-plane tripwire — it ships
+  // COMMENTED, in lockstep with the AUDIT_API_TOKEN binding above: uncomment BOTH to arm it.
+  // Shipping the trigger armed made every fork run the watcher and write an hourly
+  // `audit_watch_skipped` row into the append-only, never-pruned audit_log (~8,760 rows/year/env)
+  // — for a capability the kit tells you not to arm. Dormant means dormant.
+  "triggers": { "crons": ["0 3 * * *"] },
+  // "triggers": { "crons": ["0 3 * * *", "0 * * * *"] },
+
+  // `scripts/provision.mjs` creates the resources and fills the placeholder IDs.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "work-queue-requests-db",
+      "database_id": "PLACEHOLDER_RUN_PROVISION",
+      // Post-baseline schema changes live in migrations/d1/ and are applied on deploy
+      // (`wrangler d1 migrations apply`); schema.sql is the fresh-install baseline.
+      "migrations_dir": "migrations/d1"
+    }
+  ],
+  "kv_namespaces": [
+    { "binding": "SESSIONS", "id": "PLACEHOLDER_RUN_PROVISION" }
+    // Optional cache namespace. `npm run provision` does NOT create it — it creates and fills
+    // DB + SESSIONS only. Let wrangler add the entry itself, which gets the JSON (and the
+    // trailing comma the line above needs) right for you (CIAL only: a DB Israel app's resources
+    // come from its central catalog, so it creates nothing here; see /add-job):
+    //   npx wrangler kv namespace create work-queue-requests-cache --binding CACHE --update-config
+    // `--binding CACHE` is load-bearing: without it wrangler derives the binding from the
+    // resource name as `paved_road_cache`, and `env.CACHE` is undefined at runtime while the
+    // deploy still succeeds. Binding names are canonical (see the header of this file).
+    // NEVER write an example id in a comment here — not the provisioning sentinel, not a
+    // fill-in, not a real one. The production preflight greps this file for the sentinel and
+    // cannot tell a comment from live config, so an illustrative id blocks the deploy of a
+    // fully provisioned app and provision cannot clear it (DECISIONS 2026-08-04; enforced by
+    // `npm run verify:edge`).
+  ],
+  "r2_buckets": [
+    { "binding": "BACKUPS", "bucket_name": "work-queue-requests-backups" }
+    // Optional media bucket (resource: work-queue-requests-media):
+    // { "binding": "MEDIA", "bucket_name": "work-queue-requests-media" }
+  ],
+
+  // Magic-link sender. Requires one-time platform setup:
+  //   wrangler email sending enable cialdnb.ai   (platform task — see docs/RESOURCES.md)
+  "send_email": [{ "name": "EMAIL" }],
+
+  // Runtime secrets have TWO mechanisms (AICOE-467; DECISIONS 2026-08-04). BINDING names stay
+  // canonical (env.<NAME>) in both; src/env.ts getSecret() reads a plain per-Worker secret and a
+  // Secrets Store binding identically, so nothing in the app changes when a secret moves scope.
+  // CIAL only, both of them, `wrangler secret put` included: a DB Israel app declares its secrets
+  // in its central catalog and has them set on its central Worker (docs/SECRETS.md, "DB Israel
+  // apps").
+  //
+  //   • PER-APP → PER-WORKER plain secret (below, `secrets.required`). Each app's own
+  //     ANTHROPIC_API_KEY + AI_GATEWAY_TOKEN are `wrangler secret put` secrets scoped to THIS
+  //     Worker — they do NOT consume a slot in the 100-cap account Secrets Store, which is the
+  //     whole point (a new app used to mint two store entries; now it mints none). Declared
+  //     `required` so a deploy fails CLOSED, listing the missing name, if either is absent.
+  //     ORDERING: the FIRST deploy carries them (`wrangler deploy --secrets-file
+  //     .secrets.prod.json`); they then persist across every later (CI) deploy, which needs no
+  //     secrets file. Do NOT `wrangler secret put` (or `secret bulk`) before that first deploy:
+  //     on a missing Worker wrangler silently CREATES a stub one (createDraftWorker — its prompt
+  //     defaults to yes, even non-interactively), and that stub gets a workers.dev route, an
+  //     off-zone ingress until a real deploy turns it off. The no-file alternative is the
+  //     platform owner's placeholder (bruno 05b/05c), which switches workers.dev off. See
+  //     docs/IMPLEMENTATION-HANDBOOK.md §8 and the `npm run provision` next-steps.
+  //   • SHARED → account Secrets Store (`secrets_store_secrets`). One entry serves every kit app,
+  //     so these don't grow per-app. `PAVED_ROAD_ALERT_WEBHOOK_URL` is one account-wide Slack
+  //     webhook (the central shared channel); NOT renamed on bootstrap (the
+  //     SHARED_SECRET_NAMES allowlist in src/platform/bootstrap.ts keeps the rename + tripwire off
+  //     it). A per-app alert channel is an in-app Alerting override, not a secret.
+  //
+  // EXISTING apps keep their per-app Anthropic/AI-Gateway STORE bindings until they cut over to
+  // per-Worker via the secrets-migration runbook (a held UPG PR + the migrator) — NEVER via a
+  // blind /kit-upgrade, which would drop the store binding before the plain secret exists and
+  // break AI at request time. See CHANGELOG "Unreleased".
+  "secrets": { "required": ["ANTHROPIC_API_KEY", "AI_GATEWAY_TOKEN"] },
+
+  // store_id is the account Secrets Store id (an identifier, not a credential).
+  "secrets_store_secrets": [
+    {
+      "binding": "ALERT_WEBHOOK_URL",
+      "store_id": "00000000000000000000000000000000",
+      "secret_name": "PAVED_ROAD_ALERT_WEBHOOK_URL"
+    }
+    // Turnstile siteverify secret — UNCOMMENT (with the leading comma) to enable the login
+    // bot-challenge; also set TURNSTILE_SITE_KEY below. FLEET-SHARED secret: one Turnstile widget
+    // serves every kit app, so the value already lives in the Secrets Store as
+    // PAVED_ROAD_TURNSTILE_SECRET (un-renamed on bootstrap, like the alert webhook + Entra secret —
+    // SHARED_SECRET_NAMES). Nothing to create; just uncomment + set the site key. BEFORE enabling,
+    // ask the platform owner to add THIS app's hostnames (<app>.cialdnb.ai AND
+    // staging-<app>.cialdnb.ai) to the shared widget's allowlist, or the widget errors on that
+    // domain. Left commented so a fork's deploy never requires a binding it hasn't opted into.
+    // ,{
+    //   "binding": "TURNSTILE_SECRET",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "PAVED_ROAD_TURNSTILE_SECRET"
+    // }
+    // Entra SSO client secret — UNCOMMENT (with the leading comma) when enabling Microsoft
+    // sign-in; also set ENTRA_CLIENT_ID + ENTRA_ALLOWED_TENANTS below. SHARED secret (one
+    // "CIAL Internal Apps" registration for every kit app — SHARED_SECRET_NAMES keeps the
+    // name un-renamed). See docs/runbooks/entra-sso-setup.md.
+    // ,{
+    //   "binding": "ENTRA_CLIENT_SECRET",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "PAVED_ROAD_ENTRA_CLIENT_SECRET"
+    // }
+    // Fleet registry token — UNCOMMENT (with the leading comma) to report this app to the App
+    // Registry catalogue. The registry URL is baked into the kit, so this token is the ONLY thing
+    // to wire: create it ONCE in the Secrets Store as REGISTRY_TOKEN (a member-role t_* token
+    // minted in the registry) — this is a FLEET-SHARED secret, not per-app: the registry tells
+    // apps apart by source_key, not by token, so every app uses the same one (hence the un-renamed
+    // bare name, like the other cross-app secrets). Production then reports daily; no REGISTRY_URL
+    // var needed. (Prefer `wrangler secret put REGISTRY_TOKEN` instead? That needs no binding here.
+    // Either way CIAL only: a DB Israel app declares it in its central catalog, docs/SECRETS.md.)
+    // ,{
+    //   "binding": "REGISTRY_TOKEN",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "REGISTRY_TOKEN"
+    // }
+    // Control-plane tripwire token (Sensitive-Data Protection capability, OPT-IN) — a Cloudflare
+    // API token scoped "Account · Audit Logs · Read". UNCOMMENT (with the leading comma) to ARM
+    // the hourly tripwire; create it in the Secrets Store as <APP>_AUDIT_API_TOKEN. Left commented
+    // so the capability is DORMANT by default (no token ⇒ the cron no-ops + audits a skip).
+    // ,{
+    //   "binding": "AUDIT_API_TOKEN",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "WORK_QUEUE_REQUESTS_AUDIT_API_TOKEN"
+    // }
+  ],
+
+  "vars": {
+    "APP_NAME": "work-queue-requests",
+    "APP_ENV": "production",
+    "DASHBOARD_HOST": "",
+    "MAIL_FROM": "auth@invalid.example",
+    "MAIL_FROM_NAME": "Work Queue Requests",
+    "CF_ACCOUNT_ID": "",
+    // FLEET-SHARED AI Gateway — one authenticated gateway for every kit app (Cloudflare caps
+    // gateways at ~20/account). NOT renamed per app: per-app attribution rides the
+    // cf-aig-metadata header (src/ai/anthropic.ts). Unset = AI kill switch. DECISIONS 2026-08-28.
+    "AI_GATEWAY_ID": "",
+    "AI_DEFAULT_MODEL": "claude-sonnet-4-6",
+    "AI_LARGE_MODEL": "claude-opus-4-8",
+    "AI_MAX_CALL_USD": "0.5",
+    "AI_DAILY_USER_CAP_USD": "5",
+    "AI_DAILY_GLOBAL_CAP_USD": "50",
+    "SESSION_TTL_SEC": "86400",
+    // Invite eligibility (A3, DECISIONS 2026-06-13): "" = OPEN (default — external-user
+    // apps work out of the box; invite-only is the real gate). Use "trusted" for the
+    // internal set (cballiance.com, cialdnb.com, dbisrael.co.il, trustedpartners.com),
+    // or a comma list (optionally including "trusted").
+    "ALLOWED_EMAIL_DOMAINS": "",
+    // Failure alerting (A4): comma-separated emails (app owner + extras). The central
+    // Slack channel goes in the ALERT_WEBHOOK_URL secret (Slack incoming webhook).
+    "ALERT_EMAIL": "",
+    // Turnstile public site key — DISABLED while empty. The value below is the FLEET-SHARED
+    // widget's key: PUBLIC (not a secret — it ships to every browser), and the SAME value for
+    // staging + prod and for every kit app. To enable: comment out the empty line and uncomment
+    // the value line, and uncomment TURNSTILE_SECRET above — AFTER the platform owner adds this
+    // app's hostnames (<app>.cialdnb.ai + staging-<app>.cialdnb.ai) to the shared widget's
+    // allowlist, or the widget errors with `invalid domain`. Ships disabled so forks work out of
+    // the box. See docs/SECURITY-EDGE.md.
+    "TURNSTILE_SITE_KEY": "",
+    // "TURNSTILE_SITE_KEY": "0x4AAAAAAD1YnhyvyCloL7zA",
+    // Microsoft Entra SSO (multi-tenant OIDC) — both empty = DISABLED (magic links only).
+    // To enable: client id of the shared "CIAL Internal Apps" registration, the tenant-GUID
+    // allowlist, this app's redirect URI added to the registration, and the
+    // ENTRA_CLIENT_SECRET secret uncommented above. Tenant IDs (public):
+    //   cialdnb.com          73605f97-96bb-44f9-8ec9-93ba79679f7d
+    //   dbisrael.co.il       b0bc8251-7bd6-42a8-ab9a-1b1400673f23
+    //   trustedpartners.com  49c52830-6566-4306-8913-eda9078d2bf2
+    // See docs/runbooks/entra-sso-setup.md.
+    "ENTRA_CLIENT_ID": "",
+    "ENTRA_ALLOWED_TENANTS": "",
+    // Email domains the login page steers to Microsoft sign-in (UX only; magic links stay
+    // valid). Typically: "cialdnb.com,dbisrael.co.il,trustedpartners.com".
+    "ENTRA_EMAIL_DOMAINS": "",
+    // Control-plane tripwire (Sensitive-Data Protection capability, OPT-IN — src/cron/auditWatch.ts).
+    // Account id + alert recipient reuse CF_ACCOUNT_ID + ALERT_EMAIL above; the host shown reuses
+    // DASHBOARD_HOST. AUDIT_DEPLOY_ACTORS is the sanctioned deploy pipeline's audit identity —
+    // left EMPTY so EVERY control-plane change to this app alerts (safe no-false-negative default:
+    // a deploy receipt beats a missed key read). Populate it with the CI token's actor email/id
+    // once observed in the first alerts, to silence routine deploys. AUDIT_MATCH defaults to
+    // APP_NAME (override only if resources are renamed). The token itself is a Secrets Store
+    // binding (AUDIT_API_TOKEN above, commented = dormant), never a var.
+    "AUDIT_DEPLOY_ACTORS": "",
+    // The in-app agent (KIT-MANAGED arming flag, enforced by `npm run verify:edge`): exactly "on"
+    // or "off", in this block, never a secret or a `--var`. It ships "off". Arming takes the
+    // controls the PIA makes conditions of arming IN THIS BLOCK — READ_AUDIT "on", the
+    // DPO-approved AGENT_TRANSCRIPT_RETENTION_DAYS, an AGENT_ARMING_RECORD, the reaper cron and
+    // the AGENT_RUN Workflow — and production is not on the agent's environment ladder yet
+    // (src/ai/agentVocabulary.mjs), so "on" here fails CI. See src/env.ts and DECISIONS.
+    "AGENT_ENABLED": "off"
+  }
+}

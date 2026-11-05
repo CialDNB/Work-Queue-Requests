@@ -1,0 +1,470 @@
+# Paved-road fences, enforced in CI (semgrep scan --config semgrep/ --error).
+# These rules make the architecture self-defending: the patterns they block are
+# exactly how past incidents happened (unscoped data access from feature code).
+#
+# EVERY rule in this file declares `[typescript, javascript]`, and the second word is load-bearing
+# rather than tidy. Semgrep picks targets by EXTENSION: `[typescript]` alone matches .ts/.tsx and
+# NOTHING else, so a .js/.mjs/.cjs under src/ is scanned by no rule below at all — `semgrep scan`
+# reports "Ran 8 rules on 0 files" and exits 0. src/ is TypeScript by convention, but the convention
+# is not enforced anywhere, and it has a deliberate exception: a dependency-free .mjs that a
+# plain-node script and the worker both import, so they share one definition. The kit ships three
+# (src/framework/readAuditVocabulary.mjs, src/ai/policyVocabulary.mjs and
+# src/ai/agentVocabulary.mjs, so the plain-node verify:edge gate can import them) and a fork may
+# add its own. A fence that silently stops applying to a file shape the repo actually contains is
+# worse than no fence: the working agreement still says `env.DB` outside src/data/ fails CI, and
+# it would not.
+rules:
+  - id: d1-access-outside-data-layer
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Database access must go through the repository layer in src/data/.
+      Routes receive a ready-made ctx.db — use it. If you genuinely need a new
+      query, add a repository method in src/data/ (protected core, code-owner review).
+    patterns:
+      # Member access ($ENV.DB also catches an aliased `const e = ctx.env; e.DB`),
+      # bracket access, and destructuring — so `const { DB } = ctx.env` can't slip the
+      # fence. $ENV matches any expression; DB is the canonical binding name.
+      - pattern-either:
+          - pattern: $ENV.DB
+          - pattern: $ENV["DB"]
+          - pattern: const { DB } = $ENV
+          - pattern: let { DB } = $ENV
+          - pattern: var { DB } = $ENV
+          - pattern: const { DB, ... } = $ENV
+          - pattern: let { DB, ... } = $ENV
+          - pattern: var { DB, ... } = $ENV
+          - pattern: "const { DB: $X } = $ENV"
+          - pattern: "let { DB: $X } = $ENV"
+          - pattern: "var { DB: $X } = $ENV"
+    paths:
+      include:
+        - src
+      exclude:
+        - src/data
+
+  - id: no-direct-fetch-in-routes
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Routes and the framework must not call fetch() directly — external calls
+      belong in a typed integration module (like src/ai/) or the data layer, where
+      allowlists, budgets, and audit apply.
+    patterns:
+      # Bare fetch plus the global-object forms; closes globalThis/self/window.fetch.
+      - pattern-either:
+          - pattern: fetch(...)
+          - pattern: globalThis.fetch(...)
+          - pattern: self.fetch(...)
+          - pattern: window.fetch(...)
+    paths:
+      include:
+        - src/routes
+        - src/framework
+        # src/mcp is transport-adapter code in the framework's trust tier — an MCP tool must
+        # reach externals through the same typed modules an HTTP route does, never a raw fetch().
+        - src/mcp
+        # src/auth holds KIT-OWNED route modules too (serviceIdentityRoutes.ts — routes that
+        # travel with /kit-upgrade), so it is fenced like src/routes. The one typed integration
+        # module in it, the Entra OIDC client, is the one exclusion; a new one is an explicit,
+        # reviewed line here, never a silent gap.
+        - src/auth
+      exclude:
+        - src/auth/oidc.ts
+
+  - id: email-binding-outside-transport
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      The EMAIL binding is only used by the transport seam (src/email/transport.ts).
+      Send email via sendEmail() so the fail-open behavior, sender identity, and
+      future provider swaps stay in one place.
+    patterns:
+      # Mirrors the DB fence's destructure/alias closure (AICOE-456; the DB rule got these
+      # in AICOE-203, the EMAIL rule was skipped). One deliberate deviation from the DB
+      # rule: bare member ACCESS ($ENV.EMAIL) stays legal, because the health surface
+      # legitimately presence-checks the optional binding (`!env.EMAIL`, src/health.ts).
+      # Everything that could carry a send out of the seam is banned instead: direct sends
+      # (member + bracket), destructuring/aliasing the binding, and passing it into a
+      # helper — so the only legal use outside src/email is an inline truthiness check.
+      - pattern-either:
+          - pattern: $ENV.EMAIL.send(...)
+          - pattern: $ENV["EMAIL"].send(...)
+          - pattern: const { EMAIL } = $ENV
+          - pattern: let { EMAIL } = $ENV
+          - pattern: var { EMAIL } = $ENV
+          - pattern: const { EMAIL, ... } = $ENV
+          - pattern: let { EMAIL, ... } = $ENV
+          - pattern: var { EMAIL, ... } = $ENV
+          - pattern: "const { EMAIL: $X } = $ENV"
+          - pattern: "let { EMAIL: $X } = $ENV"
+          - pattern: "var { EMAIL: $X } = $ENV"
+          - pattern: const $X = $ENV.EMAIL
+          - pattern: let $X = $ENV.EMAIL
+          - pattern: var $X = $ENV.EMAIL
+          - pattern: $F(..., $ENV.EMAIL, ...)
+    paths:
+      include:
+        - src
+      exclude:
+        - src/email
+
+  # Private-database bindings (Hyperdrive, Workers VPC). Same fence as D1, keyed on a NAME
+  # PREFIX rather than one literal binding, because an app may hold several — one per cluster.
+  # The prefix is not cosmetic: check-edge-hardening.mjs REQUIRES these bindings to be named
+  # HYPERDRIVE_*/VPC_*, so the convention and this rule hold each other up. Without that guard
+  # a binding named `HD` would sail past the fence; without this rule the naming would be
+  # decoration. Split in two because the member/destructure forms bind an identifier
+  # metavariable and the bracket form does not.
+  - id: hyperdrive-access-outside-data-layer
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Private-database access must go through the repository layer in src/data/.
+      A route never touches env.HYPERDRIVE_* / env.VPC_* directly — the binding hands out a
+      live database credential. Add a repository method in src/data/ (protected core,
+      code-owner review) and let the route call that. See docs/DATA-ROUTES.md.
+    patterns:
+      - pattern-either:
+          - pattern: $ENV.$BINDING
+          - pattern: const { $BINDING } = $ENV
+          - pattern: let { $BINDING } = $ENV
+          - pattern: var { $BINDING } = $ENV
+          - pattern: "const { $BINDING: $X } = $ENV"
+          - pattern: "let { $BINDING: $X } = $ENV"
+          - pattern: "var { $BINDING: $X } = $ENV"
+      - metavariable-regex:
+          metavariable: $BINDING
+          regex: ^(HYPERDRIVE|VPC)_[A-Z0-9_]*$
+    paths:
+      include:
+        - src
+      exclude:
+        - src/data
+
+  - id: hyperdrive-bracket-access-outside-data-layer
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Private-database access must go through the repository layer in src/data/.
+      env["HYPERDRIVE_…"] is the same reach as env.HYPERDRIVE_… — add a repository method in
+      src/data/ instead. See docs/DATA-ROUTES.md.
+    pattern-regex: '\[\s*["'']((HYPERDRIVE|VPC)_[A-Z0-9_]*)["'']\s*\]'
+    paths:
+      include:
+        - src
+      exclude:
+        - src/data
+
+  # ── The read-attribution seam (Fleet Ledger K2a) ─────────────────────────────────────────
+  # The two rules above stop route code reaching a private database. These two close the gap
+  # they deliberately leave open: they exempt ALL of src/data/, so any repository could hold a
+  # binding and query it with nothing recorded. Read attribution is the compensating control for
+  # putting client data on a shared Cloudflare account, so "a repository could skip it" is not an
+  # acceptable residual — the fence narrows from the directory to the single seam function.
+  #
+  # NARROWING, not duplicating: the rule above excludes src/data entirely; this one INCLUDES
+  # src/data and excludes only src/data/aurora.ts. Together they say the binding lives in exactly
+  # one file, and the rule after this one says that within that file it is reachable from exactly
+  # one function.
+  - id: hyperdrive-binding-outside-aurora-seam
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Inside src/data/, a private-database binding may only be touched in src/data/aurora.ts.
+      Every Aurora read goes through auroraQuery(), which writes the read_log ledger — a read
+      that skips it is a client-data access with no attribution, which is the exact control the
+      shared-account decision depends on. Resolve the client in aurora.ts and pass it in
+      (ctx.client is injected). See docs/DATA-ROUTES.md.
+    patterns:
+      - pattern-either:
+          - pattern: $ENV.$BINDING
+          - pattern: const { $BINDING } = $ENV
+          - pattern: let { $BINDING } = $ENV
+          - pattern: var { $BINDING } = $ENV
+          - pattern: "const { $BINDING: $X } = $ENV"
+          - pattern: "let { $BINDING: $X } = $ENV"
+          - pattern: "var { $BINDING: $X } = $ENV"
+      - metavariable-regex:
+          metavariable: $BINDING
+          regex: ^(HYPERDRIVE|VPC)_[A-Z0-9_]*$
+    paths:
+      include:
+        - src/data
+      exclude:
+        - src/data/aurora.ts
+
+  # The ledger is written by auroraQuery() immediately around ONE call site (runQuery). A second
+  # raw `.query()` anywhere in src/ is, by construction, a read that call site never saw — so it
+  # is a read the ledger never recorded. This catches the shape the previous rule cannot: a client
+  # legitimately resolved in aurora.ts and then queried somewhere else, or handed to a helper.
+  #
+  # `pattern-not-inside` scopes the exemption to the seam function itself rather than to the file,
+  # so a new function added to aurora.ts does not silently inherit the exemption. `.rows` is
+  # matched too because it is how a raw result is unwrapped, and `unsafe`/`connect` because they
+  # are the standard escape hatches on Postgres drivers.
+  #
+  # TWO exempted functions, and the second one is why there is a second: banning `.connect()`
+  # everywhere left NO legal site to open a connection from. The kit ships no resolver, so it
+  # never tripped its own rule — the first fork to bind a database did. `openAuroraClient()` in
+  # src/data/aurora.ts is that site: it resolves the binding, calls `.connect()` once, and returns
+  # the client the seam is then handed.
+  #
+  # Each exemption is PAIRED WITH THE ONE CALL its function is allowed to make — which is why the
+  # shape below is two guarded branches rather than one call list with two escapes appended. A
+  # single shared not-inside list would have exempted BOTH functions from ALL FOUR calls, so
+  # `openAuroraClient` could quietly grow a `.query()` — a read the ledger never sees, added
+  # inside the one function nobody would think to re-read. Connect is legal only in the opener;
+  # query is legal only in `runQuery`; neither borrows the other's licence.
+  #
+  # And it is the FUNCTION that is exempt, never the file. `openAuroraClientish` is not
+  # `openAuroraClient`, a third function added to aurora.ts inherits nothing, and widening this
+  # list is a conversation to have out loud, not a fix to apply.
+  - id: aurora-raw-query-outside-seam
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Raw private-database calls belong to auroraQuery() in src/data/aurora.ts and nowhere else.
+      A read that does not pass through the seam writes no read_log row, so it is client-data
+      access with no attribution — and every other control here assumes there is none. Register
+      an AuroraQuerySpec with defineAuroraQuery() and call auroraQuery(ctx, spec) instead.
+      See docs/DATA-ROUTES.md.
+    patterns:
+      - pattern-either:
+          # Reading. Legal only inside the seam's single call site.
+          - patterns:
+              - pattern-either:
+                  - pattern: $CLIENT.query(...)
+                  - pattern: $CLIENT.queryArray(...)
+                  - pattern: $CLIENT.unsafe(...)
+              - pattern-not-inside: |
+                  async function runQuery(...) { ... }
+          # Opening. Legal only inside the resolver, which never reads.
+          - patterns:
+              - pattern: $CLIENT.connect(...)
+              - pattern-not-inside: |
+                  async function openAuroraClient(...) { ... }
+      # `c.req.query('token')` (Hono's query-STRING reader) is not a database call and predates
+      # this rule in src/auth/routes.ts. Excluded by shape, not by path, so the exemption cannot
+      # widen when a file moves.
+      - pattern-not: $X.req.query(...)
+    paths:
+      include:
+        - src
+
+  # ── Log hygiene (PIA condition C5) ───────────────────────────────────────────────────────────
+  # Workers Logs are on at head_sampling_rate 1, keep every line for 7 days, and cannot delete
+  # one — so a line is an undeletable, account-visible copy that no retention sweep or erasure
+  # reaches. src/platform/logEvent.ts is the ONE door: a closed registry of events whose fields are
+  # typed, screened (emails, URLs, free text become markers) and whose errors are reduced to a
+  # category. This rule makes it the only door by banning every reference to `console` under src/
+  # outside that file. It bans the IDENTIFIER, not just calls, so the indirect forms die too:
+  # `console.error(x)`, `console['error'](x)`, `console[level](x)` (src/auth/oidc.ts had one),
+  # `const { error } = console`, `const log = console.log`, `helper(console)`, `globalThis.console`,
+  # `self['console']`. It also bans the MODULE: nodejs_compat is on in every config, and
+  # `node:console` (or `console`) exports the global console's own methods, so
+  # `import { error } from 'node:console'; error(x)` never names the identifier. The regex takes
+  # every way to load it — `import … from`, `export … from`, `require(…)`, `import(…)` — because
+  # semgrep 1.97.0 mis-parses `export … from` patterns (they matched every file when probed).
+  #
+  # Probed against the CI-pinned semgrep 1.97.0 with tracked (`git add -N`) probe files: each of the
+  # ten identifier forms above drew a finding in src/*.ts, src/*.mjs, src/platform/<any other
+  # file>.ts and src/web/*.ts; the same text drew none in web/src/, tools/secrets-migrator/src/ and
+  # test/, and src/platform/logEvent.ts's own console calls draw none. Each module form drew one:
+  # named, namespace, default and type imports of `node:console` and `console`, `require` of both,
+  # dynamic `import()`, and `export { log } from` / `export * from` / `export * as x from`. A
+  # string literal `'console'` and a comment draw none.
+  #
+  # Scope, and why it is spelled out: semgrep 1.97.0 anchors NEITHER `paths.include` NOR
+  # `paths.exclude` to the repo root — `src` (and `/src`, `src/**`) also selects
+  # tools/secrets-migrator/src/ and web/src/, and an exclude (`web/src`, `/web/src`, `./web/src`
+  # alike) also exempts the same path nested ANYWHERE, e.g. src/routes/web/src/ (all probed). The
+  # two roots are excluded by name: the migrator is a separate throwaway Worker with its own console
+  # fence (semgrep/secrets-migrator.yml), and web/ runs in the browser, where nothing reaches
+  # Workers Logs. The exclude is `web/src`, not `web`: a bare `web` also matches a src/web/
+  # directory at any depth. What those excludes over-match under src/ — src/**/web/src,
+  # src/**/tools/secrets-migrator, src/**/src/platform/logEvent.ts — is scanned by the `-nested`
+  # rule below (probed: it flags exactly those three and nothing at the real roots). Tests are
+  # outside src/ (and semgrep's built-in .semgrepignore drops test/ anyway).
+  #
+  # WHAT THIS RULE DOES NOT CATCH — it is a tripwire, not a proof. Semgrep OSS cannot follow a value
+  # across files, so it cannot tell WHAT reaches logEvent; the registry's runtime screens are that
+  # control. A name built at runtime (`globalThis[`con${'sole'}`]`, `require('con' + 'sole')`)
+  # escapes it, as it escapes every identifier fence here. .mts/.cts are invisible to every rule
+  # (DECISIONS 2026-08-20).
+  - id: console-outside-log-event
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Log through logEvent() from src/platform/logEvent.ts, never `console` directly. Workers Logs
+      keep every line for 7 days and cannot delete one, so a line may carry no message or tool
+      content, no third-party identifier, no URL with a token and no email address (PIA C5).
+      logEvent takes only registered events with typed, screened fields and reduces an error to
+      its category. Add your event to KIT_LOG_EVENTS (kit code) or to your app's own
+      createLogger() registry.
+    pattern-either:
+      - pattern: console
+      - pattern: $OBJ.console
+      - pattern: $OBJ["console"]
+      - pattern-regex: (?:\bfrom|\brequire\s*\(|\bimport\s*\()\s*["'](?:node:)?console["']
+    paths:
+      include:
+        - src
+      exclude:
+        - src/platform/logEvent.ts
+        - tools/secrets-migrator
+        - web/src
+
+  # The same fence over exactly what the excludes above over-match (semgrep 1.97.0 does not anchor
+  # an exclude): a web/src, a tools/secrets-migrator or a src/platform/logEvent.ts NESTED under
+  # src/. Without it, `src/routes/web/src/x.ts` could call console freely (probed).
+  - id: console-outside-log-event-nested
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Log through logEvent() from src/platform/logEvent.ts, never `console` directly — this path
+      only LOOKS like the browser SPA, the secrets migrator or the logger itself; it is Worker code
+      under src/. Workers Logs keep every line for 7 days and cannot delete one (PIA C5).
+    pattern-either:
+      - pattern: console
+      - pattern: $OBJ.console
+      - pattern: $OBJ["console"]
+      - pattern-regex: (?:\bfrom|\brequire\s*\(|\bimport\s*\()\s*["'](?:node:)?console["']
+    paths:
+      include:
+        - src/**/web/src
+        - src/**/tools/secrets-migrator
+        - src/**/src/platform/logEvent.ts
+
+  # A ROUTE'S HANDLER RUNS ONLY INSIDE executeRoute. Every surface that runs a route — the HTTP
+  # adapter, the MCP tools, the in-app agent's tools (buildAgentTools) — goes through
+  # executeRoute (src/framework/execute.ts), which is what gives every one of them the permission
+  # check, the rate limit, Zod validation, audit-on-write, the read ledger and `_via`/`_turn`
+  # attribution. Calling `spec.handler(ctx, input)` anywhere else is a second, unpaved dispatch
+  # path: an agent tool wired that way would run with no permission check at all. The kit calls it
+  # in exactly one place, and so do insights and cbs-macrolens. dunable (a second dispatcher,
+  # src/apps/defineAppRoute.ts) and Arena-2 (a custom MCP server, src/mcp/server.ts) do not: the
+  # CHANGELOG entry for this rule tells them to route through executeRoute, or to keep a reviewed
+  # line-level `// nosemgrep: agent-dispatch-bypass` with its reason — the fork-owned exclusion, so
+  # nobody has to edit this protected-core rule.
+  #
+  # Covered: a direct call (`x.handler(…)`, `x["handler"](…)`, optional chaining included), the
+  # function-object forms (`.call`, `.apply`, `.bind`, `Reflect.apply`), a comma call
+  # (`(0, x.handler)(…)`), taking the member into a variable (`const run = x.handler`, `h =
+  # x["handler"]` — the usual first step of calling it by another name), and destructuring it out
+  # of an object. Tests are outside `src/` and not scanned. NOT covered: passing `spec.handler` as
+  # an argument to a helper, or reaching it through a computed key — semgrep sees names, not values,
+  # so this is a tripwire over the common shapes, and review is the rest.
+  - id: agent-dispatch-bypass
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Run a route only through executeRoute (src/framework/execute.ts) — never by calling its
+      `handler` yourself. executeRoute is what applies the permission check (uniform 404), the
+      rate limit, input validation, audit-on-write, the read ledger and invocation attribution;
+      a direct handler call skips every one of them. An HTTP route is mounted with mountRoutes, an
+      MCP tool comes from buildMcpTools, an agent tool from buildAgentTools
+      (src/framework/agentTools.ts).
+    pattern-either:
+      - pattern: $X.handler(...)
+      - pattern: $X["handler"](...)
+      - pattern: $X.handler.call(...)
+      - pattern: $X.handler.apply(...)
+      - pattern: $X.handler.bind(...)
+      - pattern: Reflect.apply($X.handler, ...)
+      - pattern: ($A, $X.handler)(...)
+      - pattern: const $V = $X.handler
+      - pattern: let $V = $X.handler
+      - pattern: var $V = $X.handler
+      - pattern: $V = $X.handler
+      - pattern: const $V = $X["handler"]
+      - pattern: let $V = $X["handler"]
+      - pattern: var $V = $X["handler"]
+      - pattern: $V = $X["handler"]
+      - pattern: const { handler } = $X
+      - pattern: let { handler } = $X
+      - pattern: var { handler } = $X
+      - pattern: const { handler, ... } = $X
+      - pattern: let { handler, ... } = $X
+      - pattern: var { handler, ... } = $X
+      - pattern: "const { handler: $H } = $X"
+      - pattern: "let { handler: $H } = $X"
+      - pattern: "var { handler: $H } = $X"
+      - pattern: "const { handler: $H, ... } = $X"
+    paths:
+      include:
+        - src
+      exclude:
+        - src/framework/execute.ts
+
+  # A route module reaches data through ctx.db and nothing else. `needs` scopes ctx.db, the read
+  # ledger watches it, and AGENT_FORBIDDEN_REPOSITORIES is checked against `needs` — none of which
+  # sees a handle the module built itself. makeDb() returns EVERY repository (the audit log, the
+  # read ledger, tokens, settings), so an exposed route with `needs: ['notes']` that imported it
+  # could write an audit row with a forged `_via` (review probe, P1-A). Kit route modules outside
+  # src/routes are listed by file; src/auth's other modules are the session and login seams, which
+  # need makeDb and are never routes an agent can be offered (AGENT_FORBIDDEN).
+  - id: data-handle-in-routes
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Route modules reach data only through ctx.db — never makeDb(). ctx.db is what `needs` scopes
+      (an undeclared repository throws), what the read ledger records and what the agent guard
+      checks; a makeDb() handle reaches every repository, the audit log and credentials included.
+      If the route needs another repository, add it to `needs`.
+    pattern-either:
+      - pattern: import { makeDb } from "$S"
+      - pattern: import { makeDb as $A } from "$S"
+      - pattern: makeDb(...)
+      - pattern: $NS.makeDb
+      - pattern: $NS["makeDb"]
+      - pattern: const { makeDb } = $X
+      - pattern: let { makeDb } = $X
+      - pattern: const { makeDb, ... } = $X
+      - pattern: "const { makeDb: $A } = $X"
+      - pattern: "let { makeDb: $A } = $X"
+    paths:
+      include:
+        - src/routes
+        - src/auth/serviceIdentityRoutes.ts
+
+  # The same fence over exactly what the exclude above over-matches (semgrep 1.97.0 does not anchor
+  # an exclude, as with console-outside-log-event-nested): an `src/framework/execute.ts` NESTED
+  # under src/. Without it, `src/routes/x/src/framework/execute.ts` could call a handler freely
+  # (probed).
+  - id: agent-dispatch-bypass-nested
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >
+      Run a route only through executeRoute — this file only LOOKS like src/framework/execute.ts;
+      it is nested under src/, and a handler called here skips the permission check, validation,
+      audit-on-write, the read ledger and invocation attribution.
+    pattern-either:
+      - pattern: $X.handler(...)
+      - pattern: $X["handler"](...)
+      - pattern: $X.handler.call(...)
+      - pattern: $X.handler.apply(...)
+      - pattern: $X.handler.bind(...)
+      - pattern: Reflect.apply($X.handler, ...)
+      - pattern: ($A, $X.handler)(...)
+      - pattern: const $V = $X.handler
+      - pattern: let $V = $X.handler
+      - pattern: var $V = $X.handler
+      - pattern: $V = $X.handler
+      - pattern: const $V = $X["handler"]
+      - pattern: let $V = $X["handler"]
+      - pattern: var $V = $X["handler"]
+      - pattern: $V = $X["handler"]
+      - pattern: const { handler } = $X
+      - pattern: let { handler } = $X
+      - pattern: var { handler } = $X
+      - pattern: const { handler, ... } = $X
+      - pattern: let { handler, ... } = $X
+      - pattern: var { handler, ... } = $X
+      - pattern: "const { handler: $H } = $X"
+      - pattern: "let { handler: $H } = $X"
+      - pattern: "var { handler: $H } = $X"
+      - pattern: "const { handler: $H, ... } = $X"
+    paths:
+      include:
+        - src/**/src/framework/execute.ts

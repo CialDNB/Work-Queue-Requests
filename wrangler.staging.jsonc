@@ -1,0 +1,167 @@
+// Local development and tests only. DB Israel central delivery ignores this file; bindings, vars,
+// crons and hostnames come from the central catalog. See docs/CENTRAL-DELIVERY.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "work-queue-requests-staging",
+  "main": "src/index.ts",
+  "account_id": "00000000000000000000000000000000",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // Log hygiene (KIT-MANAGED, enforced by `npm run verify:edge`; PIA C5): Workers Logs keep every
+  // line 7 days and cannot delete one. Our own lines go through logEvent(); the platform's
+  // per-request INVOCATION record would add the request URL — `/auth/verify?token=<live token>`,
+  // `/api/users/<address>` — so it is off. Do not turn it on. See docs/DECISIONS.md 2026-09-23.
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false }
+  },
+  "placement": { "mode": "smart" },
+
+  // Source maps OFF, explicitly (DECISIONS 2026-10-25, upload_source_maps). From wrangler 4.150.0
+  // a config WITHOUT this key uploads source maps on every deploy, each embedding the full original
+  // source of src/ and its bundled dependencies. Off keeps the deploy artifact what it was; turning
+  // them on is a separate, recorded decision. Do not delete the key: absent now means on.
+  "upload_source_maps": false,
+
+  // Edge-hardening (KIT-MANAGED, enforced by `npm run verify:edge`): custom domain only.
+  // workers.dev + preview URLs bypass the zone WAF / rate limiting, so both stay off even
+  // on staging (it's a real public hostname). See docs/SECURITY-EDGE.md.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  "assets": {
+    "directory": "./web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/auth/*", "/_health", "/mcp"]
+  },
+
+  // Daily ops loop + the hourly control-plane tripwire (OPT-IN, dispatched by controller.cron in
+  // src/cron/index.ts). The tripwire is DORMANT until AUDIT_API_TOKEN is set (commented below).
+  // The second entry ("0 * * * *") is the OPT-IN hourly control-plane tripwire — it ships
+  // COMMENTED, in lockstep with the AUDIT_API_TOKEN binding above (uncomment BOTH to arm).
+  // See wrangler.jsonc for why an armed-by-default trigger was wrong.
+  "triggers": { "crons": ["0 3 * * *"] },
+  // "triggers": { "crons": ["0 3 * * *", "0 * * * *"] },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "work-queue-requests-db-staging",
+      "database_id": "PLACEHOLDER_RUN_PROVISION",
+      // Post-baseline schema changes live in migrations/d1/ and are applied on deploy
+      // (`wrangler d1 migrations apply`); schema.sql is the fresh-install baseline.
+      "migrations_dir": "migrations/d1"
+    }
+  ],
+  "kv_namespaces": [{ "binding": "SESSIONS", "id": "PLACEHOLDER_RUN_PROVISION" }],
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "work-queue-requests-backups-staging" }],
+  "send_email": [{ "name": "EMAIL" }],
+
+  // Runtime secrets: two mechanisms (AICOE-467; DECISIONS 2026-08-04), same split as
+  // wrangler.jsonc — see that file's comment for the full rationale. CIAL only, both of them,
+  // `wrangler secret put` included: a DB Israel app declares its secrets in its central catalog
+  // and has them set on its central Worker (docs/SECRETS.md, "DB Israel apps").
+  //   • PER-APP → PER-WORKER plain secret (`secrets.required` below). This app's own
+  //     ANTHROPIC_API_KEY + AI_GATEWAY_TOKEN are `wrangler secret put` secrets on the staging
+  //     Worker — no account Secrets Store slot consumed. `required` is PER-ENVIRONMENT (it is NOT
+  //     inherited from wrangler.jsonc), so it is declared here too. Set them on the FIRST staging
+  //     deploy via `wrangler deploy --config wrangler.staging.jsonc --secrets-file
+  //     .secrets.staging.json`; they persist for every later CI deploy. Never `wrangler secret
+  //     put` them BEFORE that deploy: on a missing Worker wrangler silently creates a stub one
+  //     with a workers.dev route (see wrangler.jsonc). (One key per app, so the same values you
+  //     use in production — the two envs share the app's keys.)
+  //   • SHARED → account Secrets Store: `PAVED_ROAD_ALERT_WEBHOOK_URL` (one account-wide webhook,
+  //     not renamed on bootstrap — SHARED_SECRET_NAMES allowlist). No staging-specific secret.
+  "secrets": { "required": ["ANTHROPIC_API_KEY", "AI_GATEWAY_TOKEN"] },
+
+  "secrets_store_secrets": [
+    {
+      "binding": "ALERT_WEBHOOK_URL",
+      "store_id": "00000000000000000000000000000000",
+      "secret_name": "PAVED_ROAD_ALERT_WEBHOOK_URL"
+    }
+    // Turnstile siteverify secret — UNCOMMENT (with the leading comma) to enable the login
+    // bot-challenge on staging; also set TURNSTILE_SITE_KEY below. FLEET-SHARED secret
+    // (PAVED_ROAD_TURNSTILE_SECRET — one widget for every kit app, same secret as prod, un-renamed
+    // on bootstrap). Nothing to create. BEFORE enabling, ask the platform owner to add this app's
+    // staging-<app>.cialdnb.ai hostname to the shared widget's allowlist. Left commented so deploys
+    // don't require it.
+    // ,{
+    //   "binding": "TURNSTILE_SECRET",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "PAVED_ROAD_TURNSTILE_SECRET"
+    // }
+    // Entra SSO client secret — UNCOMMENT (with the leading comma) when enabling Microsoft
+    // sign-in; also set ENTRA_CLIENT_ID + ENTRA_ALLOWED_TENANTS below. SHARED secret (one
+    // "CIAL Internal Apps" registration for every kit app; same name as prod).
+    // ,{
+    //   "binding": "ENTRA_CLIENT_SECRET",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "PAVED_ROAD_ENTRA_CLIENT_SECRET"
+    // }
+    // Fleet registry token (staging). Staging reports to the fleet registry just like production
+    // (as `<app>-staging`, so it never clobbers the prod row) — but this is a SEPARATE Worker, so
+    // arming prod in wrangler.jsonc does NOT arm staging: UNCOMMENT the block below to put this
+    // app's staging deploy in the catalogue. No REGISTRY_URL needed (the URL is baked into the
+    // kit); set that only to point staging at a DIFFERENT registry. Secrets Store: REGISTRY_TOKEN (the
+    // same FLEET-SHARED secret prod uses — not per-app; see wrangler.jsonc for why the name is bare).
+    // ,{
+    //   "binding": "REGISTRY_TOKEN",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "REGISTRY_TOKEN"
+    // }
+    // Control-plane tripwire token (OPT-IN) — UNCOMMENT (with the leading comma) to arm the hourly
+    // tripwire on staging. Per-app secret <APP>_AUDIT_API_TOKEN. Left commented = dormant.
+    // ,{
+    //   "binding": "AUDIT_API_TOKEN",
+    //   "store_id": "00000000000000000000000000000000",
+    //   "secret_name": "WORK_QUEUE_REQUESTS_AUDIT_API_TOKEN"
+    // }
+  ],
+
+  "vars": {
+    "APP_NAME": "work-queue-requests",
+    "APP_ENV": "staging",
+    "DASHBOARD_HOST": "work-queue-requests.staging.dbisrael.ai",
+    "MAIL_FROM": "auth@invalid.example",
+    "MAIL_FROM_NAME": "Work Queue Requests (staging)",
+    "CF_ACCOUNT_ID": "",
+    // FLEET-SHARED AI Gateway (same value as wrangler.jsonc — staging is told apart by the
+    // cf-aig-metadata `env` key, not a separate gateway). NOT renamed per app.
+    "AI_GATEWAY_ID": "",
+    "AI_DEFAULT_MODEL": "claude-sonnet-4-6",
+    "AI_LARGE_MODEL": "claude-opus-4-8",
+    "AI_MAX_CALL_USD": "0.5",
+    "AI_DAILY_USER_CAP_USD": "5",
+    "AI_DAILY_GLOBAL_CAP_USD": "50",
+    "SESSION_TTL_SEC": "86400",
+    // Mirrors the production default (A3): "" = open, invite-only is the real gate.
+    // Set "trusted" or a comma list to restrict. (Tests use wrangler.test.jsonc, which
+    // keeps an explicit allowlist so the restrictive path stays covered.)
+    "ALLOWED_EMAIL_DOMAINS": "",
+    "ALERT_EMAIL": "",
+    // Turnstile public site key — DISABLED while empty. The value below is the FLEET-SHARED
+    // widget's key: PUBLIC (not a secret), SAME value as prod. To enable: comment out the empty
+    // line and uncomment the value line, and uncomment TURNSTILE_SECRET above — AFTER the platform
+    // owner adds staging-<app>.cialdnb.ai to the shared widget's allowlist. See docs/SECURITY-EDGE.md.
+    "TURNSTILE_SITE_KEY": "",
+    // "TURNSTILE_SITE_KEY": "0x4AAAAAAD1YnhyvyCloL7zA",
+    // Microsoft Entra SSO — both empty = DISABLED. Same values as production (the shared
+    // registration carries BOTH redirect URIs); see wrangler.jsonc for the tenant-ID table
+    // and docs/runbooks/entra-sso-setup.md for setup.
+    "ENTRA_CLIENT_ID": "",
+    "ENTRA_ALLOWED_TENANTS": "",
+    // Email domains the login page steers to Microsoft sign-in (UX only; magic links stay
+    // valid). Typically: "cialdnb.com,dbisrael.co.il,trustedpartners.com".
+    "ENTRA_EMAIL_DOMAINS": "",
+    // Control-plane tripwire (OPT-IN). Empty allowlist = every control-plane change alerts (safe
+    // default); reuses CF_ACCOUNT_ID + ALERT_EMAIL + DASHBOARD_HOST. Dormant until AUDIT_API_TOKEN.
+    "AUDIT_DEPLOY_ACTORS": "",
+    // The in-app agent's arming flag (KIT-MANAGED, `npm run verify:edge`): ships "off". Staging is
+    // not on the agent's environment ladder yet (src/ai/agentVocabulary.mjs), so "on" here fails
+    // CI; see wrangler.jsonc for the controls that must arrive with it.
+    "AGENT_ENABLED": "off"
+  }
+}

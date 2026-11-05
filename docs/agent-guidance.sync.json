@@ -1,0 +1,22 @@
+{
+  "_comment": "Drift guard for the working agreement. When the canonical (CLAUDE.md, surfaced to non-Claude-Code tools as AGENTS.md) changes, reconsider the curated mirrors and re-stamp: npm run verify:agents -- --write. Enforced by scripts/check-agent-guidance-sync.mjs (verify:agents) in CI. Tree-only by design — DECISIONS 2026-06-12 'test the tree, not the commit'.",
+  "source": {
+    "path": "CLAUDE.md",
+    "sha256": "54c6805e87645862fad5ba158757ffa70e59f2fede28411724cace852996928b"
+  },
+  "mirrors": [
+    {
+      "path": "AGENTS.md",
+      "note": "Symlink to CLAUDE.md — surfaces the full agreement to Cursor and other AGENTS.md-aware tools.",
+      "equalsSource": true
+    },
+    {
+      "path": ".cursor/rules/paved-road.mdc",
+      "note": "Cursor always-on rule: curated subset of the load-bearing invariants."
+    },
+    {
+      "path": "docs/PLAYBOOKS.md",
+      "note": "The skills as editor-neutral runbooks."
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+# Daily edge-drift check — the CONTINUOUS half of verify:edge:live. CI verifies the edge on
+# every deploy; this catches a control someone toggled off in the Cloudflare dashboard BETWEEN
+# deploys (the gap the assessment named). Runs check-edge-live.mjs against the live zone/worker:
+# workers.dev off, WAF + /auth rate-limit rules present, security headers + Turnstile intact.
+#
+# Alerting is GitHub-native (a red run notifies watchers) plus an OPTIONAL Slack ping. NOTE: that
+# ping reads a GitHub Actions REPO SECRET named ALERT_WEBHOOK_URL — a SEPARATE secret from the
+# worker's Secrets-Store PAVED_ROAD_ALERT_WEBHOOK_URL (Actions can't read the Secrets Store). If a
+# fork doesn't set the repo secret, the Slack job no-ops (guarded) and you rely on the red-run
+# notification. The worker holds no Cloudflare API token, so the CF-API inventory lives here, not
+# in a worker cron (DECISIONS 2026-07-03); the worker's edge_probe cron rides sendAlert for the
+# credential-free checks it can do between runs.
+name: edge-live
+
+on:
+  schedule:
+    # 04:17 UTC daily — after the 03:00 ops cron, off the top-of-hour runner rush.
+    - cron: '17 4 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edge-live
+  cancel-in-progress: false
+
+jobs:
+  deployment-target:
+    # The edge checked here is the CIAL one, so the check runs for a CIAL app only and skips
+    # (green, with a notice) for a DB Israel app or a template copy whose bootstrap has not
+    # merged. scripts/deployment-target.mjs reads the ref this run is on and the default branch
+    # (checked out into a directory of its own), and `cial` is 'true' only when both are CIAL. An
+    # invalid deployment marker, or a sign of a DB Israel app with no marker, fails this job, and
+    # the run is red. It installs nothing, and neither checkout keeps a token. See
+    # docs/DECISIONS.md 2026-10-27.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      cial: ${{ steps.run-ref.outputs.cial == 'true' && steps.default-branch.outputs.cial == 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .default-branch
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Deployment target of this ref
+        id: run-ref
+        run: node scripts/deployment-target.mjs --github-output
+      - name: Deployment target of the default branch
+        id: default-branch
+        run: node scripts/deployment-target.mjs --github-output --root .default-branch
+
+  check:
+    needs: [deployment-target]
+    if: needs.deployment-target.result == 'success' && needs.deployment-target.outputs.cial == 'true'
+    runs-on: ubuntu-latest
+    # Bound the job so a half-open socket to the CF API can't hang to the 6-hour default kill.
+    # check-edge-live already retries + times out each request; this is the backstop.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Verify edge controls are live (staging)
+        run: npm run verify:edge:live -- --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          # A dedicated-zone fork sets this so a DELETED (not just disabled) Host-pin is flagged.
+          EDGE_REQUIRE_HOST_PIN: ${{ vars.EDGE_REQUIRE_HOST_PIN }}
+      # Production is opt-in: only a fork that has gone live sets EDGE_LIVE_PROD=1 (else the check
+      # would fail against a prod domain that doesn't exist yet).
+      # The one DETECTIVE control in the cross-app work (DECISIONS 2026-08-18): Cloudflare logs
+      # nothing for /d1/.../query, but Worker settings ARE readable — so we can at least ask
+      # whether the deployed Worker still binds what this repo declares. `Workers Scripts: Edit`
+      # is account-wide and a deploy preserves secrets, so another app's token can replace this
+      # Worker and keep its bindings; RETARGETED is what that looks like.
+      - name: Verify deployed bindings match the repo (staging)
+        run: node scripts/check-binding-drift.mjs --env staging
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Verify deployed bindings match the repo (production)
+        if: vars.EDGE_LIVE_PROD == '1'
+        run: node scripts/check-binding-drift.mjs --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Verify edge controls are live (production)
+        if: vars.EDGE_LIVE_PROD == '1'
+        run: npm run verify:edge:live -- --env production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          EDGE_REQUIRE_HOST_PIN: ${{ vars.EDGE_REQUIRE_HOST_PIN }}
+
+  notify:
+    # Optional: ping the same Slack webhook the ops alert uses (no-op if the secret is unset). A
+    # job of its own, so it fires when `check` fails and also when the deployment-target guard
+    # fails: a failed guard skips `check`, and that day's drift check did not run. `failure()` at
+    # job level is true when any job this one needs failed. The HTTP checks retry, so this fires on
+    # a PERSISTENT failure (real drift or a durable check error), not a one-off blip — the message
+    # says "failed", not "a control changed", since a failure could also be an unverifiable check.
+    # The message names the repository at run time (GITHUB_REPOSITORY is owner/name; a GitHub
+    # repository name is JSON-safe), so this carried file never names an app. It checks out and
+    # installs nothing, and reads no secret but the webhook.
+    needs: [deployment-target, check]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Notify on edge-live failure
+        env:
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+          GUARD_RESULT: ${{ needs.deployment-target.result }}
+        run: |
+          if [ -n "$ALERT_WEBHOOK_URL" ]; then
+            repo="${GITHUB_REPOSITORY#*/}"
+            if [ "$GUARD_RESULT" = "failure" ]; then
+              what="could not read the deployment target, so the edge was not checked"
+            else
+              what="check FAILED — an edge control drifted or could not be verified"
+            fi
+            curl -sS -X POST -H 'content-type: application/json' \
+              --data "{\"text\":\"[${repo}] edge-live ${what}. See the failed edge-live run.\"}" \
+              "$ALERT_WEBHOOK_URL" || true
+          fi

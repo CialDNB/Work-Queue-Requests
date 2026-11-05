@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "focusedSeconds": 60,
+  "fullGateSeconds": 600,
+  "gateRunnerMinutes": 15,
+  "regressionPercent": 20,
+  "windowSize": 3,
+  "historyLimit": 12,
+  "shardImbalanceRatio": 1.5,
+  "workflowPath": ".github/workflows/ci.yml",
+  "requiredJobs": ["test-gates", "test", "actionlint", "secrets-scan", "semgrep"],
+  "suiteJobPrefix": "test-suite",
+  "expectedSuiteJobs": 1,
+  "comparisonFiles": [
+    ".github/workflows/ci.yml",
+    "package-lock.json",
+    "vitest.config.ts",
+    "test/projects.mjs",
+    "test/runtime/minimal-worker.ts",
+    "test/runtime/wrangler.test-minimal.jsonc",
+    "test/setup/node-no-network.ts",
+    "wrangler.test.jsonc",
+    "test-performance-budget.json"
+  ]
+}

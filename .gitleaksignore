@@ -1,0 +1,3 @@
+# gitleaks false-positive fingerprints, one per line, each with a comment
+# explaining why it is safe. Format: <commit>:<file>:<rule-id>:<line>
+# Keep this list short — prefer restructuring code over suppressing findings.

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "linear": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.14.3", "https://mcp.linear.app/sse"]
+    },
+    "cloudflare-bindings": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.14.3", "https://bindings.mcp.cloudflare.com/sse"]
+    },
+    "docshub": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.14.3", "https://docshub.cballiance.com/mcp"]
+    }
+  }
+}

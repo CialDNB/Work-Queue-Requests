@@ -1,0 +1,34 @@
+{
+  "_comment": "Every kit-owned D1 migration, pinned by the sha256 of its normalised statements. Checked by scripts/check-kit-migrations.mjs (npm run verify:kit-migrations): an app must hold a copy of each, under any number. Kit maintainers: pin a new migration with `npm run verify:kit-migrations -- --write`. Never hand-edit a hash.",
+  "normalisation": 1,
+  "migrations": [
+    {
+      "file": "0000_kit_app_identity.sql",
+      "sha256": "af8703cf63c536e1dc6a46f448425bcd3253a5e2dde94a769d0577315d6fd76c"
+    },
+    {
+      "file": "0001_read_log.sql",
+      "sha256": "f466887b1a7a85532cf8cab19d0e66a23bb507da0e085da6e4e8d4ee70edd8aa"
+    },
+    {
+      "file": "0002_read_log_kind.sql",
+      "sha256": "f746d1d2c76ffc05eb37d9c5543973c8b137e530cd19ac976dc18235d16fde3b"
+    },
+    {
+      "file": "0003_api_token_scopes.sql",
+      "sha256": "344e4831532185bb9002d0aec7b43347643a8293613642ea5278dc879d15a83a"
+    },
+    {
+      "file": "0004_service_identities.sql",
+      "sha256": "94ec50bfb3ccd6d245bd16e7db1ef825603e4de2d592d5b2b4490e5daaa89dd6"
+    },
+    {
+      "file": "0005_read_log_upstream.sql",
+      "sha256": "09e0190bd4ffd55c1ebebdf29f5e34c0d0b3839af1eebddb7dfa4ad6b29162e8"
+    },
+    {
+      "file": "0006_agent_tables.sql",
+      "sha256": "6081abcbfac07969fc6c692154ea20419c3cdeeb99fd620da42dc4378c76b5b9"
+    }
+  ]
+}

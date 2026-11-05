@@ -1,0 +1,46 @@
+# Security headers for the SPA document + static assets, served by Cloudflare Static
+# Assets (Vite copies web/public/* verbatim into web/dist/). KIT-MANAGED DEFAULTS:
+# when running /kit-upgrade, diff this file and adopt tightened headers unless your app
+# documents a reason to diverge (e.g. a CSP that must allow an extra script/style/
+# connect origin for a third-party widget). This mirrors the worker-side headers in
+# src/index.ts. The CSP is strict because the production build emits only external,
+# same-origin module scripts + one stylesheet — no inline script or style.
+#
+# DELIBERATE DIVERGENCE (DECISIONS 2026-06-18): the CSP allows https://challenges.cloudflare.com
+# in script-src/style-src/frame-src/connect-src so the Turnstile login widget can load. This is
+# the kit default — Turnstile is wired on the login page (disabled until configured). It's the
+# documented third-party-widget exception this header block anticipates; keep it on /kit-upgrade.
+#
+# DELIBERATE DIVERGENCE (DECISIONS 2026-08-04): Cache-Control carries `no-transform` on every
+# non-asset path. Cloudflare bot **JavaScript Detections** — on by default with Bot Fight Mode, and
+# live on the fleet's zone — INJECTS an inline <script> (window.__CF$cv$params) into HTML responses
+# at the edge. Its body embeds the per-request ray id, so its hash changes every response: no
+# static CSP hash can ever allow it, and this strict script-src (correctly) blocks it on every
+# page load, filling the console with violations and leaving JSD permanently unpassed. Cloudflare
+# documents exactly two remedies: a per-response CSP **nonce** (their edge parses the CSP header
+# and attaches the nonce to its injected script — impossible for statically-served assets with
+# static headers), or **`Cache-Control: no-transform`**, which makes the edge skip the injection
+# entirely. The kit takes the documented no-transform path: the CSP stays byte-identical, nothing
+# is weakened, and no inline script is ever injected to block. Residual trade: bot
+# `js_detection.passed` reads "missing" for this app — JSD is signal-only unless a zone WAF custom
+# rule keys on that field, so nothing is enforced today; if your zone ever enforces it, the fix is
+# serving HTML through the worker with per-request CSP nonces. Keep this on /kit-upgrade.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data:; script-src 'self' https://challenges.cloudflare.com; style-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com
+
+# Hashed, content-addressed bundles: cache forever, and DO allow edge transforms (compression).
+# _headers rules COMBINE same-named headers across every matching block rather than replacing
+# them — re-stating Cache-Control here is NOT enough (verified live on a fork 2026-08-04: assets
+# came back with both values comma-joined, `…must-revalidate, no-transform, public,
+# max-age=31536000, immutable` — ambiguous max-age AND no-transform disabling edge compression on
+# exactly the bundles that need it). The `! Header-Name` DETACH line removes the inherited /*
+# value first, making this block authoritative. The security headers from /* still apply here.
+# Nothing under /assets/* is HTML, so dropping no-transform costs no CSP safety.
+/assets/*
+  ! Cache-Control
+  Cache-Control: public, max-age=31536000, immutable

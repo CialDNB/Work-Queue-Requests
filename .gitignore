@@ -1,0 +1,21 @@
+node_modules/
+.wrangler/
+web/dist/
+coverage/
+.test-results/
+.DS_Store
+.env
+
+# Local secrets — never commit. Copy .dev.vars.example to .dev.vars.
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# One-time `--secrets-file` bundles for the FIRST deploy of a per-Worker secret
+# (per-app ANTHROPIC_API_KEY / AI_GATEWAY_TOKEN — see docs/IMPLEMENTATION-HANDBOOK.md §8).
+# Delete after the deploy; the value persists on the Worker. NEVER commit.
+.secrets.json
+.secrets.*.json
+
+# Personal Claude Code settings (shared settings.json IS committed)
+.claude/settings.local.json
