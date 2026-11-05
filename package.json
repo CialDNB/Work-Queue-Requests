@@ -66,7 +66,7 @@
     "sharp": "^0.35.4"
   },
   "devDependencies": {
-    "@babel/parser": "7.29.7",
+    "@babel/parser": "8.1.0",
     "@biomejs/biome": "^2.5.15",
     "@cloudflare/vitest-pool-workers": "^0.23.0",
     "@cloudflare/workers-types": "^5.20261019.1",
